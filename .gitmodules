@@ -1,0 +1,3 @@
+[submodule "models/lightweight-denoise-48k"]
+	path = models/lightweight-denoise-48k
+	url = https://github.com/a2heng/lightweight-denoise-48k.git

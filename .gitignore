@@ -1,0 +1,13 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# python3.8 environments
+py38/
+
+*.spec
+/audio_denoise_config.json
