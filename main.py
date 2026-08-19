@@ -5,6 +5,7 @@ import time
 import random
 import string
 import datetime
+import argparse
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext
 from tkinterdnd2 import DND_FILES, TkinterDnD
@@ -421,7 +422,7 @@ def extract_audio(input_path: str, temp_audio_path: str) -> bool:
         return False
 
 def process_audio_file(audio_path: str, output_path: str, model_path: str, progress_callback=None,
-                       chunk_duration: float = 30.0) -> bool:
+                       chunk_duration: float = 30.0, output_sr: int = None) -> bool:
     """
     分块处理音频文件：numpy STFT → ONNX 推理 → numpy ISTFT
     """
@@ -501,6 +502,14 @@ def process_audio_file(audio_path: str, output_path: str, model_path: str, progr
                 if progress_callback:
                     progress_callback(processed / total_frames)
 
+        if output_sr and output_sr != 48000:
+            from scipy.signal import resample_poly
+            from math import gcd
+            data, sr = sf.read(output_path, dtype='float32')
+            g = gcd(sr, output_sr)
+            data = resample_poly(data, output_sr // g, sr // g).astype(np.float32)
+            sf.write(output_path, data, output_sr, subtype='PCM_16')
+
         os.remove(temp_standard_path)
         return True
 
@@ -578,7 +587,7 @@ def replace_video_audio(video_path: str, audio_path: str, output_path: str) -> b
         print(f"[DEBUG] replace_video_audio: 异常: {str(e)}")
         return False
 
-def process_media_file(input_path: str, output_dir: str, model_path: str, progress_callback=None) -> Tuple[bool, str]:
+def process_media_file(input_path: str, output_dir: str, model_path: str, progress_callback=None, output_sr: int = None) -> Tuple[bool, str]:
     """处理媒体文件"""
     try:
         # 检查文件类型
@@ -620,7 +629,7 @@ def process_media_file(input_path: str, output_dir: str, model_path: str, progre
             # 处理音频
             temp_processed_audio_path = os.path.join(output_dir, f"temp_processed_{random_hex}.wav")
             print(f"[DEBUG] 开始处理音频: {temp_audio_path} -> {temp_processed_audio_path}")
-            if not process_audio_file(temp_audio_path, temp_processed_audio_path, model_path, progress_callback):
+            if not process_audio_file(temp_audio_path, temp_processed_audio_path, model_path, progress_callback, output_sr=output_sr):
                 print(f"[DEBUG] 处理音频失败")
                 os.remove(temp_audio_path)
                 return False, "处理音频失败"
@@ -660,7 +669,7 @@ def process_media_file(input_path: str, output_dir: str, model_path: str, progre
         else:
             # 处理音频文件
             print(f"[DEBUG] 开始处理音频文件: {input_path} -> {output_path}")
-            if not process_audio_file(input_path, output_path, model_path, progress_callback):
+            if not process_audio_file(input_path, output_path, model_path, progress_callback, output_sr=output_sr):
                 print(f"[DEBUG] 处理音频文件失败")
                 return False, "处理音频失败"
             print(f"[DEBUG] 音频文件处理成功，输出文件大小: {os.path.getsize(output_path)} 字节")
@@ -671,5 +680,50 @@ def process_media_file(input_path: str, output_dir: str, model_path: str, progre
         return False, f"处理失败: {str(e)}"
 
 if __name__ == "__main__":
-    app = AudioDenoiseApp()
-    app.mainloop()
+    if len(sys.argv) > 1:
+        parser = argparse.ArgumentParser(description="PureWav - audio denoiser")
+        parser.add_argument("input", nargs="?", help="input audio file")
+        parser.add_argument("-o", "--output", help="output wav path")
+        parser.add_argument("-m", "--model", default=None, help="ONNX model path")
+        parser.add_argument("-r", "--sr", type=int, default=None, help="output sample rate (default: same as input)")
+        args = parser.parse_args()
+
+        if args.input:
+            model_path = args.model
+            if not model_path:
+                if hasattr(sys, '_MEIPASS'):
+                    model_path = os.path.join(sys._MEIPASS, "v6_erb_skip_proj_batch.onnx")
+                else:
+                    model_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                               "v6_erb_skip_proj_batch.onnx")
+
+            if args.output:
+                output_path = args.output
+            else:
+                base, ext = os.path.splitext(args.input)
+                output_path = f"{base}_denoised.wav"
+
+            output_sr = args.sr
+            if not output_sr:
+                info = sf.info(args.input)
+                output_sr = info.samplerate
+
+            print(f"Input:  {args.input}")
+            print(f"Output: {output_path} ({output_sr}Hz)")
+
+            def cli_progress(p):
+                print(f"\r  [{p*100:5.1f}%]", end="", flush=True)
+
+            success = process_audio_file(
+                args.input, output_path, model_path, cli_progress, output_sr=output_sr
+            )
+            if success:
+                print(f"\n  -> {output_path}")
+            else:
+                print(f"\n  Error: processing failed")
+                sys.exit(1)
+        else:
+            parser.print_help()
+    else:
+        app = AudioDenoiseApp()
+        app.mainloop()
