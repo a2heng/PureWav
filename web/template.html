@@ -28,11 +28,12 @@
   #fmeta { color:var(--muted); font-size:12px; }
   #barwrap { height:4px; background:var(--panel); }
   #bar { height:100%; width:0; background:var(--acc-h); transition:width .15s; }
-  #panels { flex:1; min-height:0; display:flex; gap:8px; padding:8px; }
-  .panel { flex:1; min-width:0; display:flex; flex-direction:column; gap:6px; }
-  .panel .title { font-size:12px; color:var(--muted); padding-left:4px; }
-  .wave { flex:0 0 22%; min-height:56px; background:#0d0d0d; border-radius:6px; }
-  .spec { flex:1; min-height:0; background:#0d0d0d; border-radius:6px; }
+  #panels { flex:1; min-height:0; display:flex; gap:0; padding:0; }
+  .panel { flex:1; min-width:0; display:flex; flex-direction:column; gap:0; }
+  .panel + .panel { border-left:2px solid var(--border); }
+  .panel .title { font-size:12px; color:var(--muted); padding:2px 6px; background:var(--panel); }
+  .wave { flex:0 0 22%; min-height:56px; background:#0d0d0d; border-bottom:1px solid var(--border); }
+  .spec { flex:1; min-height:0; background:#0d0d0d; }
   canvas { display:block; width:100%; height:100%; }
   footer { padding:6px 16px; color:var(--muted); font-size:12px; border-top:1px solid var(--border);
            display:flex; justify-content:space-between; }
