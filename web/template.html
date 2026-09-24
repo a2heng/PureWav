@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PureWav Web — 离线音频降噪</title>
+<style>
+  :root { --bg:#1e1e1e; --panel:#252526; --card:#2d2d30; --border:#3c3c3c;
+          --fg:#d4d4d4; --muted:#9d9d9d; --acc:#0e639c; --acc-h:#1177bb; }
+  * { box-sizing:border-box; }
+  html,body { height:100%; margin:0; }
+  body { background:var(--bg); color:var(--fg); font:14px/1.5 "Segoe UI","Noto Sans CJK SC",sans-serif;
+         display:flex; flex-direction:column; height:100vh; overflow:hidden; }
+  header { display:flex; align-items:baseline; gap:12px; padding:10px 16px; border-bottom:1px solid var(--border); }
+  header .logo { font-size:18px; font-weight:700; color:var(--acc-h); }
+  header .sub { color:var(--muted); font-size:12px; }
+  #top { display:flex; align-items:center; gap:12px; padding:10px 16px; border-bottom:1px solid var(--border); }
+  #drop { flex:1; border:1px dashed var(--border); border-radius:8px; background:var(--panel);
+          padding:12px 16px; text-align:center; color:var(--muted); cursor:pointer; transition:.15s; }
+  #drop.over { border-color:var(--acc-h); color:var(--fg); background:#2a3a46; }
+  button { height:32px; padding:0 14px; border:0; border-radius:6px; background:#3a3d3e; color:var(--fg);
+           cursor:pointer; font-size:13px; }
+  button:hover:not(:disabled) { background:#4a4d4e; }
+  button:disabled { opacity:.45; cursor:default; }
+  #dl { background:var(--acc); color:#fff; }
+  #dl:hover:not(:disabled) { background:var(--acc-h); }
+  #fname { font-weight:600; max-width:260px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  #fmeta { color:var(--muted); font-size:12px; }
+  #barwrap { height:4px; background:var(--panel); }
+  #bar { height:100%; width:0; background:var(--acc-h); transition:width .15s; }
+  #panels { flex:1; min-height:0; display:flex; gap:8px; padding:8px; }
+  .panel { flex:1; min-width:0; display:flex; flex-direction:column; gap:6px; }
+  .panel .title { font-size:12px; color:var(--muted); padding-left:4px; }
+  .wave { flex:0 0 22%; min-height:56px; background:#0d0d0d; border-radius:6px; }
+  .spec { flex:1; min-height:0; background:#0d0d0d; border-radius:6px; }
+  canvas { display:block; width:100%; height:100%; }
+  footer { padding:6px 16px; color:var(--muted); font-size:12px; border-top:1px solid var(--border);
+           display:flex; justify-content:space-between; }
+</style>
+</head>
+<body>
+<header>
+  <span class="logo">PureWav Web</span>
+  <span class="sub">离线单文件降噪 · 浏览器端 ONNX 推理 · 无需服务器</span>
+</header>
+<div id="top">
+  <div id="drop">⬇&nbsp;&nbsp;拖入一个音频文件，或点击选择</div>
+  <input id="file" type="file" accept="audio/*,.wav,.mp3,.flac,.ogg,.m4a,.aac" hidden>
+  <span id="fname">未选择文件</span>
+  <span id="fmeta"></span>
+  <button id="playOrig" disabled>▶ 原图</button>
+  <button id="playDen" disabled>▶ 降噪后</button>
+  <button id="dl" disabled>下载 WAV</button>
+</div>
+<div id="barwrap"><div id="bar"></div></div>
+<div id="panels">
+  <div class="panel">
+    <div class="title">原图</div>
+    <canvas id="waveOrig" class="wave"></canvas>
+    <canvas id="specOrig" class="spec"></canvas>
+  </div>
+  <div class="panel">
+    <div class="title">降噪后</div>
+    <canvas id="waveDen" class="wave"></canvas>
+    <canvas id="specDen" class="spec"></canvas>
+  </div>
+</div>
+<footer><span id="status">加载中…</span><span>上：波形 ±1　下：频谱（0–20k 线性 + 20–24k 分带）</span></footer>
+
+<script id="glue" type="text/plain">__GLUE_B64__</script>
+<script id="wasm" type="text/plain">__WASM_B64__</script>
+<script id="model" type="text/plain">__MODEL_B64__</script>
+<script id="inferno" type="text/plain">__INFERNO_B64__</script>
+<script>__ORT_JS__</script>
+<script>/*__APP_JS__*/</script>
+</body>
+</html>

@@ -21,6 +21,16 @@ pip install -r requirements.txt
 python main.py
 ```
 
+## Web 版（纯前端、全离线、单文件）
+
+```bash
+python web/build_web.py     # -> web/PureWavWeb.html
+```
+
+把 onnxruntime-web、ONNX 模型、色表全部内嵌进一个 HTML（约 21MB），**双击即用、无需服务器、无需联网**。
+拖入单个音频文件，浏览器端完成解码 → STFT → ONNX 推理 → ISTFT，可播放/对比并下载降噪后的 WAV。
+（需要本机有 `npm` 以便自动获取 onnxruntime-web，或用 `--ort <dist>` 指定已有目录。）
+
 ## 打包
 
 Windows 下使用 PyInstaller 打包为独立 exe：
