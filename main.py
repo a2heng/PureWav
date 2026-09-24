@@ -251,7 +251,7 @@ class AudioDenoiseApp(TkinterDnD.Tk):
         self.file_listbox.delete(0, tk.END)
     
     def show_spectrum(self):
-        """对选中文件弹出频谱可视化 (整段音频, 全频轴 + 20-24k 按 1k 分带)。"""
+        """频谱窗口: 默认显示降噪后; 按住「对比」看原图, 松手回降噪后 (两张图预计算, 切换无延迟)。"""
         sel = self.file_listbox.curselection()
         if sel:
             path = self.file_listbox.get(sel[0])
@@ -267,7 +267,8 @@ class AudioDenoiseApp(TkinterDnD.Tk):
             matplotlib.rcParams["font.sans-serif"] = ["Microsoft YaHei", "SimHei", "DejaVu Sans"]
             matplotlib.rcParams["axes.unicode_minus"] = False
             from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-            from spectrum_viz import new_figure
+            import matplotlib.pyplot as plt
+            import spectrum_viz as sv
         except Exception as e:
             messagebox.showerror("错误", f"频谱可视化需要 matplotlib: {e}")
             return
@@ -276,36 +277,76 @@ class AudioDenoiseApp(TkinterDnD.Tk):
         self.update()
 
         import tempfile
-        tmp_wav = os.path.join(tempfile.gettempdir(), "purewav_spectrum_tmp.wav")
+        tmp_src = os.path.join(tempfile.gettempdir(), "purewav_spec_src.wav")
+        tmp_enh = os.path.join(tempfile.gettempdir(), "purewav_spec_enh.wav")
         try:
             si = None
             if sys.platform == "win32":
                 si = subprocess.STARTUPINFO()
                 si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
             subprocess.run([get_ffmpeg_path(), "-i", path, "-ar", "48000", "-ac", "1",
-                            "-acodec", "pcm_s16le", tmp_wav, "-y"], check=True,
+                            "-acodec", "pcm_s16le", tmp_src, "-y"], check=True,
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, startupinfo=si)
-            audio, _ = sf.read(tmp_wav, dtype="float32")
+            noisy, _ = sf.read(tmp_src, dtype="float32")
+            if not process_audio_file(tmp_src, tmp_enh, self.model_path):
+                raise RuntimeError("模型推理失败")
+            enhanced, _ = sf.read(tmp_enh, dtype="float32")
         except Exception as e:
             self.status_var.set("就绪")
-            messagebox.showerror("错误", f"读取音频失败: {e}")
+            messagebox.showerror("错误", f"准备频谱数据失败: {e}")
             return
         finally:
-            try:
-                if os.path.exists(tmp_wav):
-                    os.remove(tmp_wav)
-            except Exception:
-                pass
+            for f in (tmp_src, tmp_enh):
+                try:
+                    if os.path.exists(f):
+                        os.remove(f)
+                except Exception:
+                    pass
 
-        fig = new_figure(audio, title=f"Spectrogram - {os.path.basename(path)}")
+        # 对齐长度, 两张同形图 → 切换只改 mesh 数据, 无重算
+        n = max(len(noisy), len(enhanced))
+        noisy = np.pad(noisy, (0, n - len(noisy)))
+        enhanced = np.pad(enhanced, (0, n - len(enhanced)))
+        disp_n, edges, times = sv.prepare(noisy)
+        disp_e, _, _ = sv.prepare(enhanced)
+        T = min(disp_n.shape[1], disp_e.shape[1])
+        disp_n, disp_e = disp_n[:, :T], disp_e[:, :T]
+        times = times[:T]
+        x_edges = np.concatenate([times, [times[-1] + sv.HOP / sv.FS]]) if T else np.array([0.0, sv.HOP / sv.FS])
+
+        name = os.path.basename(path)
+        fig, ax = plt.subplots(1, 1, figsize=(11, 4))
+        im = ax.pcolormesh(x_edges, edges, disp_e, shading="flat",
+                           cmap=sv.CMAP, vmin=sv.VMIN, vmax=sv.VMAX)
+        ax.axhline(sv.BAND_LO_HZ, color="white", linewidth=0.6, alpha=0.5)
+        ax.set_xlabel("Time (s)")
+        ax.set_ylabel("Frequency (Hz)")
+        ax.set_ylim([0, sv.BAND_HI_HZ])
+        ax.set_title(f"降噪后 - {name}")
+        fig.colorbar(im, ax=ax, label="Magnitude (dB)")
+        fig.tight_layout()
+
         win = tk.Toplevel(self)
-        win.title(f"频谱可视化 - {os.path.basename(path)}")
-        win.geometry("1100x480")
+        win.title(f"频谱 - {name}")
+        win.geometry("1120x520")
         canvas = FigureCanvasTkAgg(fig, master=win)
         canvas.draw()
         canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+        def _show(disp, title):
+            im.set_array(disp.ravel())
+            ax.set_title(title)
+            canvas.draw_idle()
+
+        bar = ttk.Frame(win)
+        bar.pack(fill=tk.X)
+        cmp_btn = ttk.Button(bar, text="对比（按住看原图）")
+        cmp_btn.pack(side=tk.LEFT, padx=8, pady=6)
+        ttk.Label(bar, text="默认显示降噪后；按住按钮显示原图，松手回到降噪后").pack(side=tk.LEFT, padx=6)
+        cmp_btn.bind("<ButtonPress-1>", lambda e: _show(disp_n, f"原图 - {name}"))
+        cmp_btn.bind("<ButtonRelease-1>", lambda e: _show(disp_e, f"降噪后 - {name}"))
         self.status_var.set("就绪")
-    
+
     def start_processing(self):
         """开始处理文件"""
         if self.processing:

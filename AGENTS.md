@@ -24,7 +24,9 @@ Same command without `--noconsole` (keeps console window for debug output).
 
 - **`main.py`** — app: GUI (TkinterDnD) + batch ONNX inference + ffmpeg subprocess calls
 - **`spectrum_viz.py`** — spectrum visualization (matplotlib): full 0–24 kHz axis with the 20–24 kHz
-  range binned into 1 kHz bands, whole-file STFT (no time segmentation); opened from the 频谱可视化 button
+  range binned into 1 kHz bands, whole-file STFT (no time segmentation). The window shows the
+  denoised result by default; a hold-to-compare button shows the original while pressed and returns
+  to the denoised result on release (both images are pre-rendered, so switching is instant).
 - **`v6_erb_skip_proj_batch.onnx`** — exported batch denoising model (STFT in → STFT out, ~0.52M params)
 - **`models/lightweight-denoise-48k/`** — git submodule: model source code
 - **`ffmpeg.exe`** — bundled; used for audio extraction, format conversion, and video audio replacement
