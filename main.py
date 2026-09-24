@@ -56,7 +56,8 @@ class AudioDenoiseApp(TkinterDnD.Tk):
             # 开发环境下使用当前目录
             icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "audio_icon.ico")
         
-        if os.path.exists(icon_path):
+        # 窗口图标: 仅 Windows 用 .ico (X11 的 Tk 不支持 .ico, 会抛 TclError)
+        if sys.platform == "win32" and os.path.exists(icon_path):
             self.iconbitmap(icon_path)
         
         # 启动队列处理线程
@@ -467,13 +468,16 @@ class AudioDenoiseApp(TkinterDnD.Tk):
 
 # 在文件顶部添加此函数
 def get_ffmpeg_path():
-    """获取ffmpeg可执行文件的路径"""
+    """ffmpeg 路径: 打包/仓库自带 ffmpeg.exe (Windows); 其它平台回退系统 ffmpeg。"""
     if hasattr(sys, '_MEIPASS'):
-        # 打包后环境
-        return os.path.join(sys._MEIPASS, 'ffmpeg.exe')
-    else:
-        # 开发环境
-        return os.path.join(os.path.dirname(os.path.abspath(__file__)), 'ffmpeg.exe')
+        p = os.path.join(sys._MEIPASS, 'ffmpeg.exe')
+        if os.path.exists(p):
+            return p
+    p = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'ffmpeg.exe')
+    if sys.platform == 'win32' and os.path.exists(p):
+        return p
+    import shutil
+    return shutil.which('ffmpeg') or p
 
 # 修改extract_audio函数
 def extract_audio(input_path: str, temp_audio_path: str) -> bool:
