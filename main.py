@@ -147,6 +147,9 @@ class AudioDenoiseApp(TkinterDnD.Tk):
         clear_btn = ttk.Button(btn_frame, text="清空列表", command=self.clear_files)
         clear_btn.pack(side=tk.LEFT, padx=5, pady=5)
         
+        spectrum_btn = ttk.Button(btn_frame, text="频谱可视化", command=self.show_spectrum)
+        spectrum_btn.pack(side=tk.LEFT, padx=5, pady=5)
+        
         # 处理按钮
         self.process_btn = ttk.Button(btn_frame, text="开始处理", command=self.start_processing)
         self.process_btn.pack(side=tk.RIGHT, padx=5, pady=5)
@@ -246,6 +249,62 @@ class AudioDenoiseApp(TkinterDnD.Tk):
     def clear_files(self):
         """清空文件列表"""
         self.file_listbox.delete(0, tk.END)
+    
+    def show_spectrum(self):
+        """对选中文件弹出频谱可视化 (整段音频, 全频轴 + 20-24k 按 1k 分带)。"""
+        sel = self.file_listbox.curselection()
+        if sel:
+            path = self.file_listbox.get(sel[0])
+        else:
+            files = self.file_listbox.get(0, tk.END)
+            if not files:
+                messagebox.showwarning("警告", "请先添加并选择一个文件")
+                return
+            path = files[0]
+
+        try:
+            import matplotlib
+            matplotlib.rcParams["font.sans-serif"] = ["Microsoft YaHei", "SimHei", "DejaVu Sans"]
+            matplotlib.rcParams["axes.unicode_minus"] = False
+            from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+            from spectrum_viz import new_figure
+        except Exception as e:
+            messagebox.showerror("错误", f"频谱可视化需要 matplotlib: {e}")
+            return
+
+        self.status_var.set(f"计算频谱: {os.path.basename(path)} ...")
+        self.update()
+
+        import tempfile
+        tmp_wav = os.path.join(tempfile.gettempdir(), "purewav_spectrum_tmp.wav")
+        try:
+            si = None
+            if sys.platform == "win32":
+                si = subprocess.STARTUPINFO()
+                si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            subprocess.run([get_ffmpeg_path(), "-i", path, "-ar", "48000", "-ac", "1",
+                            "-acodec", "pcm_s16le", tmp_wav, "-y"], check=True,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, startupinfo=si)
+            audio, _ = sf.read(tmp_wav, dtype="float32")
+        except Exception as e:
+            self.status_var.set("就绪")
+            messagebox.showerror("错误", f"读取音频失败: {e}")
+            return
+        finally:
+            try:
+                if os.path.exists(tmp_wav):
+                    os.remove(tmp_wav)
+            except Exception:
+                pass
+
+        fig = new_figure(audio, title=f"Spectrogram - {os.path.basename(path)}")
+        win = tk.Toplevel(self)
+        win.title(f"频谱可视化 - {os.path.basename(path)}")
+        win.geometry("1100x480")
+        canvas = FigureCanvasTkAgg(fig, master=win)
+        canvas.draw()
+        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+        self.status_var.set("就绪")
     
     def start_processing(self):
         """开始处理文件"""

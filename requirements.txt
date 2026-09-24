@@ -4,3 +4,4 @@ librosa>=0.11.0
 moviepy>=1.0.3
 tkinterdnd2>=0.3.0
 pyinstaller>=6.15.0
+matplotlib>=3.5.0

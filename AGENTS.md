@@ -1,6 +1,6 @@
 # PureWav — Embedded Audio Denoiser
 
-Single-file Windows desktop app (`main.py`) for audio/video noise reduction using an ONNX model. Bundles its own Python 3.8 + ffmpeg — does NOT depend on a host Python install.
+Windows desktop app (`main.py` + `spectrum_viz.py`) for audio/video noise reduction using an ONNX model. Bundles its own Python 3.8 + ffmpeg — does NOT depend on a host Python install.
 
 ## Build & Run
 
@@ -13,7 +13,7 @@ python export_batch.py   # -> v6_erb_skip_proj_batch.onnx
 
 **Package (release):**
 ```
-pyinstaller --clean --name "PureWav" --onefile --noconsole --icon="audio_icon.ico" --add-data "audio_icon.ico;." --add-data "v6_erb_skip_proj_batch.onnx;." --add-data "ffmpeg.exe;." --hidden-import=onnxruntime.capi._pybind_state --hidden-import=onnxruntime.capi.onnxruntime_pybind11_state main.py
+pyinstaller --clean --name "PureWav" --onefile --noconsole --icon="audio_icon.ico" --add-data "audio_icon.ico;." --add-data "v6_erb_skip_proj_batch.onnx;." --add-data "ffmpeg.exe;." --hidden-import=onnxruntime.capi._pybind_state --hidden-import=onnxruntime.capi.onnxruntime_pybind11_state --hidden-import=spectrum_viz main.py
 ```
 Output: `dist/PureWav.exe`
 
@@ -22,7 +22,9 @@ Same command without `--noconsole` (keeps console window for debug output).
 
 ## Key Architecture
 
-- **`main.py`** — entire app: GUI (TkinterDnD) + batch ONNX inference + ffmpeg subprocess calls
+- **`main.py`** — app: GUI (TkinterDnD) + batch ONNX inference + ffmpeg subprocess calls
+- **`spectrum_viz.py`** — spectrum visualization (matplotlib): full 0–24 kHz axis with the 20–24 kHz
+  range binned into 1 kHz bands, whole-file STFT (no time segmentation); opened from the 频谱可视化 button
 - **`v6_erb_skip_proj_batch.onnx`** — exported batch denoising model (STFT in → STFT out, ~0.52M params)
 - **`models/lightweight-denoise-48k/`** — git submodule: model source code
 - **`ffmpeg.exe`** — bundled; used for audio extraction, format conversion, and video audio replacement
