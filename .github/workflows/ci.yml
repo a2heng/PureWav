@@ -26,9 +26,9 @@ jobs:
 
       - uses: actions/setup-python@v6
         with:
-          python-version: "3.8"
+          python-version: "3.12"
 
-      - run: pip install -r requirements.txt soundfile
+      - run: pip install -r requirements.txt
 
       - name: Write version.py
         shell: pwsh
@@ -45,7 +45,6 @@ jobs:
             --icon="audio_icon.ico" `
             --add-data "audio_icon.ico;." `
             --add-data "v6_erb_skip_proj_batch.onnx;." `
-            --add-data "ffmpeg.exe;." `
             --hidden-import=onnxruntime.capi._pybind_state `
             --hidden-import=onnxruntime.capi.onnxruntime_pybind11_state `
             main.py

@@ -1,7 +1,8 @@
 numpy
+scipy
 onnxruntime
-librosa>=0.11.0
-moviepy>=1.0.3
+soundfile
+av>=12.0.0
 tkinterdnd2>=0.3.0
-pyinstaller>=6.15.0
 matplotlib>=3.5.0
+pyinstaller>=6.15.0

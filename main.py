@@ -7,15 +7,16 @@ import string
 import datetime
 import argparse
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox, scrolledtext
+from tkinter import ttk, filedialog, messagebox
 from tkinterdnd2 import DND_FILES, TkinterDnD
 import numpy as np
 import onnxruntime as ort
-import subprocess
 import soundfile as sf
 from typing import Tuple, List
 import threading
 import queue
+from fractions import Fraction
+import av
 from version import VERSION
 
 # 支持的音频和视频格式
@@ -25,12 +26,34 @@ VIDEO_FORMATS = ['.mp4', '.avi', '.mov', '.mkv', '.flv', '.wmv']
 # 配置文件路径
 CONFIG_FILE = "audio_denoise_config.json"
 
+# 深色主题配色 (对齐 wav_browser 的 VS Code 暗色风格)
+BG = "#1e1e1e"       # 窗口底
+PANEL = "#252526"    # 输入框/列表底
+CARD = "#2d2d30"     # 卡片/表头
+BORDER = "#3c3c3c"
+FG = "#d4d4d4"
+MUTED = "#9d9d9d"
+ACC = "#0e639c"      # 主色
+ACC_H = "#1177bb"
+
+
+def _fmt_size(n: int) -> str:
+    if n >= 1024 ** 3:
+        return f"{n / 1024 ** 3:.2f} GB"
+    if n >= 1024 ** 2:
+        return f"{n / 1024 ** 2:.1f} MB"
+    if n >= 1024:
+        return f"{n / 1024:.0f} KB"
+    return f"{n} B"
+
 class AudioDenoiseApp(TkinterDnD.Tk):
     def __init__(self):
         super().__init__()
         self.title(f"音频文件降噪·PureWav·v{VERSION}")
-        self.geometry("800x600")
+        self.geometry("900x700")
+        self.minsize(720, 560)
         self.config = self.load_config()
+        self._setup_theme()
         self.create_widgets()
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         
@@ -93,89 +116,133 @@ class AudioDenoiseApp(TkinterDnD.Tk):
             print(f"保存配置文件失败: {e}")
             return False
     
+    def _setup_theme(self):
+        """深色卡片式主题 (clam 主题上自绘, 无额外依赖)。"""
+        self.configure(bg=BG)
+        st = ttk.Style(self)
+        try:
+            st.theme_use("clam")
+        except tk.TclError:
+            pass
+        st.configure(".", background=BG, foreground=FG, fieldbackground=PANEL,
+                     bordercolor=BORDER, focuscolor=ACC)
+        st.configure("TFrame", background=BG)
+        st.configure("TLabel", background=BG, foreground=FG)
+        st.configure("Muted.TLabel", background=BG, foreground=MUTED)
+        st.configure("TButton", background="#3a3d3e", foreground=FG, borderwidth=0,
+                     focusthickness=0, padding=(10, 6))
+        st.map("TButton",
+               background=[("active", "#4a4d4e"), ("pressed", ACC), ("disabled", "#2a2a2a")],
+               foreground=[("disabled", MUTED)])
+        st.configure("Accent.TButton", background=ACC, foreground="#ffffff")
+        st.map("Accent.TButton", background=[("active", ACC_H), ("pressed", "#0a4d78"),
+                                             ("disabled", "#2a2a2a")])
+        st.configure("TEntry", fieldbackground=PANEL, foreground=FG, insertcolor=FG,
+                     bordercolor=BORDER, lightcolor=BORDER, darkcolor=BORDER, padding=4)
+        st.configure("TLabelframe", background=BG, bordercolor=BORDER, relief="solid", borderwidth=1)
+        st.configure("TLabelframe.Label", background=BG, foreground=MUTED)
+        st.configure("Drop.TLabel", background=PANEL, foreground=MUTED, relief="solid",
+                     borderwidth=1, bordercolor=BORDER)
+        st.configure("Treeview", background=PANEL, fieldbackground=PANEL, foreground=FG,
+                     bordercolor=BORDER, rowheight=24)
+        st.map("Treeview", background=[("selected", ACC)], foreground=[("selected", "#ffffff")])
+        st.configure("Treeview.Heading", background=CARD, foreground=MUTED,
+                     relief="flat", padding=(6, 4))
+        st.map("Treeview.Heading", background=[("active", "#3a3d3e")])
+        st.configure("TProgressbar", background=ACC, troughcolor=PANEL, bordercolor=BORDER,
+                     lightcolor=ACC, darkcolor=ACC, thickness=10)
+        st.configure("Vertical.TScrollbar", background=CARD, troughcolor=BG,
+                     bordercolor=BG, arrowcolor=MUTED)
+        st.configure("Status.TLabel", background=CARD, foreground=MUTED, padding=(10, 4))
+
     def create_widgets(self):
-        """创建UI组件"""
-        # 创建主框架
+        """创建UI组件 (深色卡片式)。"""
+        # 顶部标题
+        header = ttk.Frame(self)
+        header.pack(fill=tk.X, padx=14, pady=(12, 4))
+        ttk.Label(header, text="PureWav", font=("Segoe UI", 16, "bold"),
+                  foreground=ACC).pack(side=tk.LEFT)
+        ttk.Label(header, text=f"音频 / 视频降噪   v{VERSION}",
+                  style="Muted.TLabel").pack(side=tk.LEFT, padx=(10, 0), pady=(6, 0))
+
         main_frame = ttk.Frame(self)
-        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-        
-        # 配置区域
-        config_frame = ttk.LabelFrame(main_frame, text="配置设置")
-        config_frame.pack(fill=tk.X, padx=5, pady=5)
-        
-        # 输出目录
-        ttk.Label(config_frame, text="输出目录:").grid(row=0, column=0, padx=5, pady=5, sticky=tk.W)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=12, pady=6)
+
+        # 输出设置卡片
+        cfg = ttk.LabelFrame(main_frame, text=" 输出设置 ")
+        cfg.pack(fill=tk.X, pady=(0, 8))
+        cfg.columnconfigure(1, weight=1)
+        ttk.Label(cfg, text="输出目录").grid(row=0, column=0, padx=(10, 6), pady=10, sticky=tk.W)
         self.output_dir_var = tk.StringVar(value=self.config.get("output_dir", ""))
-        output_dir_entry = ttk.Entry(config_frame, textvariable=self.output_dir_var, width=50)
-        output_dir_entry.grid(row=0, column=1, padx=5, pady=5, sticky=tk.EW)
-        
-        browse_btn = ttk.Button(config_frame, text="浏览", command=self.browse_output_dir)
-        browse_btn.grid(row=0, column=2, padx=5, pady=5)
-        
-        # 保存配置按钮
-        save_config_btn = ttk.Button(config_frame, text="保存配置", command=self.save_app_config)
-        save_config_btn.grid(row=0, column=3, padx=5, pady=5)
-        
-        # 文件拖放区域
-        drop_frame = ttk.LabelFrame(main_frame, text="拖放文件或文件夹到此处")
-        drop_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-        
-        self.drop_label = ttk.Label(drop_frame, text="拖放音频/视频文件或文件夹到这里", 
-                                   relief=tk.SUNKEN, anchor=tk.CENTER, padding=20)
-        self.drop_label.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-        
-        # 注册拖放事件
+        ttk.Entry(cfg, textvariable=self.output_dir_var).grid(row=0, column=1, padx=6,
+                                                              pady=10, sticky=tk.EW)
+        ttk.Button(cfg, text="浏览", command=self.browse_output_dir).grid(row=0, column=2,
+                                                                        padx=6, pady=10)
+        ttk.Button(cfg, text="保存配置", command=self.save_app_config).grid(row=0, column=3,
+                                                                         padx=(6, 10), pady=10)
+
+        # 文件列表卡片
+        files = ttk.LabelFrame(main_frame, text=" 文件列表 ")
+        files.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
+        files.columnconfigure(0, weight=1)
+        files.rowconfigure(1, weight=1)
+
+        self.drop_label = ttk.Label(files, text="⬇   拖放音频 / 视频文件或文件夹到这里",
+                                    anchor=tk.CENTER, padding=14, style="Drop.TLabel")
+        self.drop_label.grid(row=0, column=0, columnspan=2, sticky=tk.EW, padx=10, pady=(10, 6))
         self.drop_label.drop_target_register(DND_FILES)
-        self.drop_label.dnd_bind('<<Drop>>', self.on_drop)
-        
-        # 文件列表
-        self.file_listbox = tk.Listbox(drop_frame, height=5)
-        self.file_listbox.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-        
-        # 按钮区域
-        btn_frame = ttk.Frame(main_frame)
-        btn_frame.pack(fill=tk.X, padx=5, pady=5)
-        
-        add_file_btn = ttk.Button(btn_frame, text="添加文件", command=self.add_files)
-        add_file_btn.pack(side=tk.LEFT, padx=5, pady=5)
-        
-        add_folder_btn = ttk.Button(btn_frame, text="添加文件夹", command=self.add_folder)
-        add_folder_btn.pack(side=tk.LEFT, padx=5, pady=5)
-        
-        remove_btn = ttk.Button(btn_frame, text="移除文件", command=self.remove_file)
-        remove_btn.pack(side=tk.LEFT, padx=5, pady=5)
-        
-        clear_btn = ttk.Button(btn_frame, text="清空列表", command=self.clear_files)
-        clear_btn.pack(side=tk.LEFT, padx=5, pady=5)
-        
-        spectrum_btn = ttk.Button(btn_frame, text="频谱可视化", command=self.show_spectrum)
-        spectrum_btn.pack(side=tk.LEFT, padx=5, pady=5)
-        
-        # 处理按钮
-        self.process_btn = ttk.Button(btn_frame, text="开始处理", command=self.start_processing)
-        self.process_btn.pack(side=tk.RIGHT, padx=5, pady=5)
-        
-        # 进度条区域
-        progress_frame = ttk.Frame(main_frame)
-        progress_frame.pack(fill=tk.X, padx=5, pady=5)
-        
-        ttk.Label(progress_frame, text="降噪进度:").pack(side=tk.LEFT, padx=5)
+        self.drop_label.dnd_bind("<<Drop>>", self.on_drop)
+
+        self.file_tree = ttk.Treeview(files, columns=("name", "size"), show="headings",
+                                      selectmode="extended")
+        self.file_tree.heading("name", text="文件名")
+        self.file_tree.heading("size", text="大小")
+        self.file_tree.column("name", anchor=tk.W, width=460)
+        self.file_tree.column("size", anchor=tk.E, width=90, stretch=False)
+        self.file_tree.grid(row=1, column=0, sticky="nsew", padx=(10, 0), pady=(0, 8))
+        vsb = ttk.Scrollbar(files, orient=tk.VERTICAL, command=self.file_tree.yview)
+        self.file_tree.configure(yscrollcommand=vsb.set)
+        vsb.grid(row=1, column=1, sticky="ns", padx=(0, 10), pady=(0, 8))
+        self.file_tree.bind("<Double-1>", lambda e: self.show_spectrum())
+
+        fbar = ttk.Frame(files)
+        fbar.grid(row=2, column=0, columnspan=2, sticky=tk.EW, padx=10, pady=(0, 10))
+        for text, cmd in (("添加文件", self.add_files), ("添加文件夹", self.add_folder),
+                          ("移除选中", self.remove_file), ("清空", self.clear_files)):
+            ttk.Button(fbar, text=text, command=cmd).pack(side=tk.LEFT, padx=(0, 6))
+
+        # 操作栏
+        actions = ttk.Frame(main_frame)
+        actions.pack(fill=tk.X, pady=(0, 8))
+        ttk.Button(actions, text="频谱可视化", command=self.show_spectrum).pack(side=tk.LEFT)
+        self.process_btn = ttk.Button(actions, text="▶  开始处理", style="Accent.TButton",
+                                      command=self.start_processing)
+        self.process_btn.pack(side=tk.RIGHT)
+
+        # 进度条
+        pf = ttk.Frame(main_frame)
+        pf.pack(fill=tk.X, pady=(0, 8))
+        ttk.Label(pf, text="进度", style="Muted.TLabel").pack(side=tk.LEFT, padx=(0, 8))
         self.progress_var = tk.IntVar(value=0)
-        self.progress_bar = ttk.Progressbar(progress_frame, variable=self.progress_var, maximum=100)
-        self.progress_bar.pack(fill=tk.X, expand=True, padx=5, pady=5)
-        
-        # 日志区域
-        log_frame = ttk.LabelFrame(main_frame, text="处理日志")
-        log_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-        
-        self.log_text = scrolledtext.ScrolledText(log_frame, wrap=tk.WORD)
-        self.log_text.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        self.progress_bar = ttk.Progressbar(pf, variable=self.progress_var, maximum=100)
+        self.progress_bar.pack(fill=tk.X, expand=True)
+
+        # 日志卡片
+        log_frame = ttk.LabelFrame(main_frame, text=" 处理日志 ")
+        log_frame.pack(fill=tk.BOTH, expand=True)
+        self.log_text = tk.Text(log_frame, wrap=tk.WORD, bg=PANEL, fg=FG,
+                                insertbackground=FG, relief=tk.FLAT, highlightthickness=0,
+                                padx=10, pady=8, height=6)
+        log_sb = ttk.Scrollbar(log_frame, orient=tk.VERTICAL, command=self.log_text.yview)
+        self.log_text.configure(yscrollcommand=log_sb.set)
+        self.log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(8, 0), pady=8)
+        log_sb.pack(side=tk.RIGHT, fill=tk.Y, padx=(0, 8), pady=8)
         self.log_text.config(state=tk.DISABLED)
-        
+
         # 状态栏
         self.status_var = tk.StringVar(value="就绪")
-        status_bar = ttk.Label(self, textvariable=self.status_var, relief=tk.SUNKEN, anchor=tk.W)
-        status_bar.pack(side=tk.BOTTOM, fill=tk.X)
+        ttk.Label(self, textvariable=self.status_var, style="Status.TLabel",
+                  anchor=tk.W).pack(side=tk.BOTTOM, fill=tk.X)
     
     def browse_output_dir(self):
         """浏览输出目录"""
@@ -222,50 +289,62 @@ class AudioDenoiseApp(TkinterDnD.Tk):
             
             self.add_files_to_list(all_files)
     
+    def _add_one(self, path):
+        """加入列表 (以完整路径作为唯一 iid, 重复添加自动跳过)。"""
+        if self.file_tree.exists(path):
+            return
+        try:
+            size = os.path.getsize(path)
+        except OSError:
+            size = 0
+        self.file_tree.insert("", tk.END, iid=path,
+                              values=(os.path.basename(path), _fmt_size(size)))
+
+    def _all_paths(self):
+        return list(self.file_tree.get_children())
+
+    def _selected_paths(self):
+        return list(self.file_tree.selection())
+
     def add_files_to_list(self, paths):
         """添加文件到列表，支持文件和文件夹"""
         for path in paths:
-            # 如果是文件夹，递归添加其中的文件
             if os.path.isdir(path):
                 for root, dirs, files in os.walk(path):
                     for file in files:
                         file_path = os.path.join(root, file)
                         if self.is_supported_file(file_path) and os.path.exists(file_path):
-                            self.file_listbox.insert(tk.END, file_path)
-            # 如果是文件，直接添加
+                            self._add_one(file_path)
             elif os.path.isfile(path) and self.is_supported_file(path):
-                self.file_listbox.insert(tk.END, path)
-    
+                self._add_one(path)
+
     def is_supported_file(self, path):
         """检查文件是否是支持的格式"""
         ext = os.path.splitext(path)[1].lower()
         return ext in AUDIO_FORMATS or ext in VIDEO_FORMATS
-    
+
     def remove_file(self):
         """移除选中的文件"""
-        selection = self.file_listbox.curselection()
-        if selection:
-            self.file_listbox.delete(selection[0])
-    
+        for iid in self.file_tree.selection():
+            self.file_tree.delete(iid)
+
     def clear_files(self):
         """清空文件列表"""
-        self.file_listbox.delete(0, tk.END)
+        self.file_tree.delete(*self.file_tree.get_children())
     
     def show_spectrum(self):
         """频谱窗口: 默认显示降噪后; 按住「对比」看原图, 松手回降噪后 (两张图预计算, 切换无延迟)。"""
-        sel = self.file_listbox.curselection()
-        if sel:
-            path = self.file_listbox.get(sel[0])
-        else:
-            files = self.file_listbox.get(0, tk.END)
-            if not files:
-                messagebox.showwarning("警告", "请先添加并选择一个文件")
-                return
-            path = files[0]
+        paths = self._selected_paths() or self._all_paths()
+        if not paths:
+            messagebox.showwarning("警告", "请先添加并选择一个文件")
+            return
+        path = paths[0]
 
         try:
             import matplotlib
-            matplotlib.rcParams["font.sans-serif"] = ["Microsoft YaHei", "SimHei", "DejaVu Sans"]
+            matplotlib.rcParams["font.sans-serif"] = [
+                "Microsoft YaHei", "SimHei", "PingFang SC", "Noto Sans CJK SC",
+                "WenQuanYi Micro Hei", "DejaVu Sans"]
             matplotlib.rcParams["axes.unicode_minus"] = False
             from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
             import matplotlib.pyplot as plt
@@ -277,32 +356,16 @@ class AudioDenoiseApp(TkinterDnD.Tk):
         self.status_var.set(f"计算频谱: {os.path.basename(path)} ...")
         self.update()
 
-        import tempfile
-        tmp_src = os.path.join(tempfile.gettempdir(), "purewav_spec_src.wav")
-        tmp_enh = os.path.join(tempfile.gettempdir(), "purewav_spec_enh.wav")
+        # 单次 IO: PyAV 解码到内存 + 内存推理, 不落任何临时文件
         try:
-            si = None
-            if sys.platform == "win32":
-                si = subprocess.STARTUPINFO()
-                si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-            subprocess.run([get_ffmpeg_path(), "-i", path, "-ar", "48000", "-ac", "1",
-                            "-acodec", "pcm_s16le", tmp_src, "-y"], check=True,
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, startupinfo=si)
-            noisy, _ = sf.read(tmp_src, dtype="float32")
-            if not process_audio_file(tmp_src, tmp_enh, self.model_path):
-                raise RuntimeError("模型推理失败")
-            enhanced, _ = sf.read(tmp_enh, dtype="float32")
+            noisy = decode_mono48k(path)
+            if len(noisy) == 0:
+                raise RuntimeError("文件没有音频流")
+            enhanced = denoise_array(noisy, self.model_path)
         except Exception as e:
             self.status_var.set("就绪")
             messagebox.showerror("错误", f"准备频谱数据失败: {e}")
             return
-        finally:
-            for f in (tmp_src, tmp_enh):
-                try:
-                    if os.path.exists(f):
-                        os.remove(f)
-                except Exception:
-                    pass
 
         # 对齐长度, 两张同形图 → 切换只改 mesh 数据, 无重算
         n = max(len(noisy), len(enhanced))
@@ -316,36 +379,77 @@ class AudioDenoiseApp(TkinterDnD.Tk):
         x_edges = np.concatenate([times, [times[-1] + sv.HOP / sv.FS]]) if T else np.array([0.0, sv.HOP / sv.FS])
 
         name = os.path.basename(path)
-        fig, ax = plt.subplots(1, 1, figsize=(11, 4))
-        im = ax.pcolormesh(x_edges, edges, disp_e, shading="flat",
-                           cmap=sv.CMAP, vmin=sv.VMIN, vmax=sv.VMAX)
-        ax.axhline(sv.BAND_LO_HZ, color="white", linewidth=0.6, alpha=0.5)
-        ax.set_xlabel("Time (s)")
-        ax.set_ylabel("Frequency (Hz)")
-        ax.set_ylim([0, sv.BAND_HI_HZ])
-        ax.set_title(f"降噪后 - {name}")
-        fig.colorbar(im, ax=ax, label="Magnitude (dB)")
-        fig.tight_layout()
+
+        # 波形包络 (±1) —— 原图 / 降噪后, 预计算两张, 切换零延迟
+        tw, wlo_n, whi_n = sv.waveform_envelope(noisy)
+        _, wlo_e, whi_e = sv.waveform_envelope(enhanced)
 
         win = tk.Toplevel(self)
         win.title(f"频谱 - {name}")
-        win.geometry("1120x520")
-        canvas = FigureCanvasTkAgg(fig, master=win)
+        win.geometry("1500x800")
+        win.minsize(820, 440)
+
+        # 左窄控制列 (定宽不随窗口伸缩) + 右巨型可视化 (吃掉全部剩余宽度)
+        win.columnconfigure(0, weight=0, minsize=150)
+        win.columnconfigure(1, weight=1)
+        win.rowconfigure(0, weight=1)
+
+        side = ttk.Frame(win, width=150)
+        side.grid(row=0, column=0, sticky="nsew", padx=(6, 2), pady=6)
+        side.grid_propagate(False)
+        body = ttk.Frame(win)
+        body.grid(row=0, column=1, sticky="nsew", padx=(2, 6), pady=6)
+
+        ttk.Label(side, text=name, wraplength=140,
+                  font=("", 8), justify=tk.LEFT).pack(anchor="w")
+        cmp_btn = ttk.Button(side, text="对比\n按住看原图")
+        cmp_btn.pack(fill=tk.X, pady=(8, 4))
+        state_lbl = ttk.Label(side, text="降噪后", font=("", 8), foreground="#0a7a3a")
+        state_lbl.pack(anchor="w")
+
+        # 右: 上波形 (±1) / 下频谱, 尽量铺满
+        fig = plt.figure(figsize=(12, 6), dpi=100)
+        gs = fig.add_gridspec(2, 1, height_ratios=[1, 3], hspace=0.08,
+                              left=0.03, right=0.995, top=0.99, bottom=0.035)
+        ax_w = fig.add_subplot(gs[0])
+        ax_s = fig.add_subplot(gs[1], sharex=ax_w)
+
+        poly_n = ax_w.fill_between(tw, wlo_n, whi_n, linewidth=0,
+                                   color="#d62728", visible=False)
+        poly_e = ax_w.fill_between(tw, wlo_e, whi_e, linewidth=0,
+                                   color="#1f77b4", visible=True)
+        ax_w.set_ylim(-1.0, 1.0)
+        ax_w.set_yticks([-1, 0, 1])
+        ax_w.set_ylabel("Wave", fontsize=6)
+        ax_w.tick_params(direction="in", labelsize=6, length=2, pad=-9)
+
+        im = ax_s.pcolormesh(x_edges, edges, disp_e, shading="flat",
+                             cmap=sv.CMAP, vmin=sv.VMIN, vmax=sv.VMAX)
+        ax_s.axhline(sv.BAND_LO_HZ, color="white", linewidth=0.6, alpha=0.5)
+        ax_s.set_ylim([0, sv.BAND_HI_HZ])
+        ax_s.set_ylabel("Hz", fontsize=6)
+        ax_s.set_xlabel("Time (s)", fontsize=6)
+        ax_s.tick_params(direction="in", labelsize=6, length=2, pad=-9)
+        ax_s.xaxis.set_major_locator(plt.MaxNLocator(6))
+        ax_s.yaxis.set_major_locator(plt.MaxNLocator(5))
+        for a in (ax_w, ax_s):
+            for s in ("top", "right"):
+                a.spines[s].set_visible(False)
+
+        canvas = FigureCanvasTkAgg(fig, master=body)
         canvas.draw()
         canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
-        def _show(disp, title):
+        def _show(disp, orig):
             im.set_array(disp.ravel())
-            ax.set_title(title)
+            poly_n.set_visible(orig)
+            poly_e.set_visible(not orig)
+            state_lbl.config(text="原图" if orig else "降噪后",
+                             foreground="#c0392b" if orig else "#0a7a3a")
             canvas.draw_idle()
 
-        bar = ttk.Frame(win)
-        bar.pack(fill=tk.X)
-        cmp_btn = ttk.Button(bar, text="对比（按住看原图）")
-        cmp_btn.pack(side=tk.LEFT, padx=8, pady=6)
-        ttk.Label(bar, text="默认显示降噪后；按住按钮显示原图，松手回到降噪后").pack(side=tk.LEFT, padx=6)
-        cmp_btn.bind("<ButtonPress-1>", lambda e: _show(disp_n, f"原图 - {name}"))
-        cmp_btn.bind("<ButtonRelease-1>", lambda e: _show(disp_e, f"降噪后 - {name}"))
+        cmp_btn.bind("<ButtonPress-1>", lambda e: _show(disp_n, True))
+        cmp_btn.bind("<ButtonRelease-1>", lambda e: _show(disp_e, False))
         self.status_var.set("就绪")
 
     def start_processing(self):
@@ -353,7 +457,7 @@ class AudioDenoiseApp(TkinterDnD.Tk):
         if self.processing:
             return
         
-        files = self.file_listbox.get(0, tk.END)
+        files = self._all_paths()
         if not files:
             messagebox.showwarning("警告", "请先添加要处理的文件")
             return
@@ -466,145 +570,145 @@ class AudioDenoiseApp(TkinterDnD.Tk):
 
 # 以下是处理函数的实现
 
-# 在文件顶部添加此函数
-def get_ffmpeg_path():
-    """ffmpeg 路径: 打包/仓库自带 ffmpeg.exe (Windows); 其它平台回退系统 ffmpeg。"""
-    if hasattr(sys, '_MEIPASS'):
-        p = os.path.join(sys._MEIPASS, 'ffmpeg.exe')
-        if os.path.exists(p):
-            return p
-    p = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'ffmpeg.exe')
-    if sys.platform == 'win32' and os.path.exists(p):
-        return p
-    import shutil
-    return shutil.which('ffmpeg') or p
+# ── 媒体后端 (PyAV: 纯 Python wheel, 自带 FFmpeg 库, 跨平台, 无需外部 exe) ──
 
-# 修改extract_audio函数
-def extract_audio(input_path: str, temp_audio_path: str) -> bool:
-    """从视频中提取音频"""
+_MODEL_SESSIONS = {}
+
+
+def load_session(model_path: str):
+    """按模型路径缓存 ONNX 会话 (避免每次处理/频谱都重新加载)。"""
+    sess = _MODEL_SESSIONS.get(model_path)
+    if sess is None:
+        sess = ort.InferenceSession(model_path, providers=['CPUExecutionProvider'],
+                                    sess_options=ort.SessionOptions())
+        _MODEL_SESSIONS[model_path] = sess
+    return sess
+
+
+def decode_mono48k(path: str, sr: int = 48000) -> np.ndarray:
+    """任意音/视频 → 48k 单声道 float32 (PyAV 解码到内存, 不落盘)。"""
+    chunks = []
+    with av.open(path) as container:
+        stream = next((s for s in container.streams if s.type == 'audio'), None)
+        if stream is None:
+            raise RuntimeError('文件没有音频流')
+        resampler = av.audio.resampler.AudioResampler(format='flt', layout='mono', rate=sr)
+        for frame in container.decode(stream):
+            for rf in resampler.resample(frame):
+                chunks.append(rf.to_ndarray().reshape(-1))
+        for rf in resampler.resample(None):
+            chunks.append(rf.to_ndarray().reshape(-1))
+    if not chunks:
+        return np.zeros(0, dtype=np.float32)
+    return np.concatenate(chunks).astype(np.float32)
+
+
+def probe_samplerate(path: str, default: int = 48000) -> int:
+    """探测文件采样率 (音频用 soundfile, 视频回退 PyAV)。"""
     try:
-        print(f"[DEBUG] extract_audio: 开始从 {input_path} 提取音频")
-        ffmpeg_path = get_ffmpeg_path()
-        print(f"[DEBUG] extract_audio: 使用ffmpeg路径: {ffmpeg_path}")
-        
-        cmd = [
-            ffmpeg_path, '-i', input_path, '-vn', '-acodec', 'pcm_s16le', 
-            '-ar', '48000', '-ac', '1', temp_audio_path, '-y'
-        ]
-        print(f"[DEBUG] extract_audio: 执行命令: {' '.join(cmd)}")
-        
-        # 添加startupinfo参数来隐藏黑框
-        si = None
-        if sys.platform == "win32":
-            si = subprocess.STARTUPINFO()
-            si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-            print(f"[DEBUG] extract_audio: 使用Windows隐藏窗口模式")
-        
-        # 捕获输出以进行调试
-        result = subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, startupinfo=si)
-        print(f"[DEBUG] extract_audio: 命令执行成功，返回码: 0")
-        
-        # 检查输出文件是否存在且不为空
-        if os.path.exists(temp_audio_path):
-            file_size = os.path.getsize(temp_audio_path)
-            print(f"[DEBUG] extract_audio: 输出文件存在，大小: {file_size} 字节")
-            if file_size > 0:
-                return True
-            else:
-                print(f"[DEBUG] extract_audio: 警告: 输出文件存在但为空")
-                return False
-        else:
-            print(f"[DEBUG] extract_audio: 错误: 输出文件不存在: {temp_audio_path}")
-            return False
-            
-    except subprocess.CalledProcessError as e:
-        print(f"[DEBUG] extract_audio: 错误: ffmpeg执行失败，返回码: {e.returncode}")
-        print(f"[DEBUG] extract_audio: 错误输出: {e.stderr.decode('utf-8', errors='ignore')}")
-        return False
-    except Exception as e:
-        print(f"[DEBUG] extract_audio: 异常: {str(e)}")
-        return False
+        return int(sf.info(path).samplerate)
+    except Exception:
+        pass
+    try:
+        with av.open(path) as c:
+            st = next((s for s in c.streams if s.type == 'audio'), None)
+            if st is not None and st.rate:
+                return int(st.rate)
+    except Exception:
+        pass
+    return default
+
+
+def _stft(signal, window, n_fft=960, hop=480):
+    frames = []
+    for i in range(0, len(signal) - len(window) + 1, hop):
+        frames.append(np.fft.rfft(signal[i:i + len(window)] * window, n=n_fft))
+    if not frames:
+        return np.zeros((1, n_fft // 2 + 1), dtype=np.complex64)
+    return np.stack(frames)
+
+
+def _istft(spec, window, hop=480, n_fft=960):
+    n_frames = spec.shape[0]
+    out_len = (n_frames - 1) * hop + len(window)
+    output = np.zeros(out_len, dtype=np.float32)
+    win_sum = np.zeros(out_len, dtype=np.float32)
+    for i in range(n_frames):
+        frame = np.fft.irfft(spec[i], n=n_fft).astype(np.float32) * window
+        start = i * hop
+        output[start:start + len(window)] += frame
+        win_sum[start:start + len(window)] += window ** 2
+    return output / np.maximum(win_sum, 1e-8)
+
+
+def _denoise_chunk(audio_chunk, session, window):
+    """一段 float32 (48k mono) → 降噪后 float32 (STFT → ONNX → ISTFT)。"""
+    spec = _stft(audio_chunk, window)
+    spec_ri = np.stack([spec.real, spec.imag], axis=-1).astype(np.float32)
+    spec_ri = spec_ri.reshape(1, spec_ri.shape[0], spec_ri.shape[1], 2)
+    spec_ri = np.transpose(spec_ri, (0, 3, 1, 2))
+    enhanced_ri = session.run(None, {'spec': spec_ri})[0]
+    enhanced_ri = np.transpose(enhanced_ri, (0, 2, 3, 1))
+    enhanced_spec = (enhanced_ri[0, :, :, 0] + 1j * enhanced_ri[0, :, :, 1]).astype(np.complex64)
+    enhanced = _istft(enhanced_spec, window)[:len(audio_chunk)]
+    return np.clip(enhanced, -1.0, 1.0)
+
+
+def denoise_array(audio: np.ndarray, model_path: str, chunk_duration: float = 30.0,
+                  progress_callback=None) -> np.ndarray:
+    """整段 float32 (48k mono) → 降噪后 float32 (内存, 不落盘)。"""
+    session = load_session(model_path)
+    window = np.hanning(960).astype(np.float32)
+    chunk = max(1, int(48000 * chunk_duration))
+    total = len(audio)
+    parts = []
+    for i in range(0, total, chunk):
+        parts.append(_denoise_chunk(audio[i:i + chunk], session, window))
+        if progress_callback:
+            progress_callback(min(1.0, (i + chunk) / max(1, total)))
+    if not parts:
+        return audio.astype(np.float32).copy()
+    return np.concatenate(parts).astype(np.float32)[:total]
+
 
 def process_audio_file(audio_path: str, output_path: str, model_path: str, progress_callback=None,
                        chunk_duration: float = 30.0, output_sr: int = None) -> bool:
-    """
-    分块处理音频文件：numpy STFT → ONNX 推理 → numpy ISTFT
-    """
-    NFFT = 960
-    HOP = 480
-    WIN = 960
-    window = np.hanning(WIN).astype(np.float32)
-
-    def stft(signal):
-        frames = []
-        for i in range(0, len(signal) - WIN + 1, HOP):
-            frame = signal[i:i + WIN] * window
-            spec = np.fft.rfft(frame, n=NFFT)
-            frames.append(spec)
-        if not frames:
-            return np.zeros((1, NFFT // 2 + 1), dtype=np.complex64)
-        return np.stack(frames)
-
-    def istft(spec):
-        n_frames, n_freq = spec.shape
-        out_len = (n_frames - 1) * HOP + WIN
-        output = np.zeros(out_len, dtype=np.float32)
-        win_sum = np.zeros(out_len, dtype=np.float32)
-        for i in range(n_frames):
-            frame = np.fft.irfft(spec[i], n=NFFT).astype(np.float32) * window
-            start = i * HOP
-            output[start:start + WIN] += frame
-            win_sum[start:start + WIN] += window ** 2
-        win_sum = np.maximum(win_sum, 1e-8)
-        return output / win_sum
-
+    """流式处理音频: PyAV 解码 → ONNX 推理 → WAV 写出 (全程无临时文件)。"""
+    session = load_session(model_path)
+    window = np.hanning(960).astype(np.float32)
+    chunk = max(1, int(48000 * chunk_duration))
     try:
-        ffmpeg_path = get_ffmpeg_path()
-        temp_standard_path = os.path.splitext(audio_path)[0] + "_standard.wav"
-
-        cmd = [
-            ffmpeg_path, '-i', audio_path, '-ar', '48000', '-ac', '1',
-            '-acodec', 'pcm_s16le', temp_standard_path, '-y'
-        ]
-        si = None
-        if sys.platform == "win32":
-            si = subprocess.STARTUPINFO()
-            si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, startupinfo=si)
-
-        session = ort.InferenceSession(model_path, providers=['CPUExecutionProvider'],
-                                       sess_options=ort.SessionOptions())
-        chunk_size = int(48000 * chunk_duration)
-
-        with sf.SoundFile(temp_standard_path, 'r') as infile, \
-             sf.SoundFile(output_path, 'w', samplerate=infile.samplerate,
-                          channels=1, subtype='PCM_16') as outfile:
-
-            total_frames = len(infile)
+        with av.open(audio_path) as container:
+            stream = next((s for s in container.streams if s.type == 'audio'), None)
+            if stream is None:
+                raise RuntimeError('文件没有音频流')
+            total = None
+            if container.duration:
+                total = int(container.duration / av.time_base * 48000)
+            resampler = av.audio.resampler.AudioResampler(format='flt', layout='mono', rate=48000)
             processed = 0
 
-            while True:
-                audio_chunk = infile.read(chunk_size, dtype='float32')
-                if len(audio_chunk) == 0:
-                    break
+            with sf.SoundFile(output_path, 'w', samplerate=48000, channels=1,
+                              subtype='PCM_16') as out:
+                buf = np.zeros(0, dtype=np.float32)
 
-                spec = stft(audio_chunk)
-                spec_ri = np.stack([spec.real, spec.imag], axis=-1).astype(np.float32)
-                spec_ri = spec_ri.reshape(1, spec_ri.shape[0], spec_ri.shape[1], 2)
-                spec_ri = np.transpose(spec_ri, (0, 3, 1, 2))
+                def emit(seg):
+                    nonlocal processed
+                    out.write(_denoise_chunk(seg, session, window))
+                    processed += len(seg)
+                    if progress_callback:
+                        progress_callback(min(1.0, processed / total) if total else 0.0)
 
-                enhanced_ri = session.run(None, {'spec': spec_ri})[0]
-                enhanced_ri = np.transpose(enhanced_ri, (0, 2, 3, 1))
-                enhanced_spec = (enhanced_ri[0, :, :, 0] + 1j * enhanced_ri[0, :, :, 1]).astype(np.complex64)
-
-                enhanced_audio = istft(enhanced_spec)
-                enhanced_audio = enhanced_audio[:len(audio_chunk)]
-                enhanced_audio = np.clip(enhanced_audio, -1.0, 1.0)
-                outfile.write(enhanced_audio)
-
-                processed += len(audio_chunk)
-                if progress_callback:
-                    progress_callback(processed / total_frames)
+                for frame in container.decode(stream):
+                    for rf in resampler.resample(frame):
+                        buf = np.concatenate([buf, rf.to_ndarray().reshape(-1).astype(np.float32)])
+                    while len(buf) >= chunk:
+                        emit(buf[:chunk])
+                        buf = buf[chunk:].copy()
+                for rf in resampler.resample(None):
+                    buf = np.concatenate([buf, rf.to_ndarray().reshape(-1).astype(np.float32)])
+                if len(buf):
+                    emit(buf)
 
         if output_sr and output_sr != 48000:
             from scipy.signal import resample_poly
@@ -613,171 +717,86 @@ def process_audio_file(audio_path: str, output_path: str, model_path: str, progr
             g = gcd(sr, output_sr)
             data = resample_poly(data, output_sr // g, sr // g).astype(np.float32)
             sf.write(output_path, data, output_sr, subtype='PCM_16')
-
-        os.remove(temp_standard_path)
         return True
-
     except Exception as e:
-        print(f"处理音频文件失败: {str(e)}")
-        try:
-            if 'temp_standard_path' in locals() and os.path.exists(temp_standard_path):
-                os.remove(temp_standard_path)
-        except:
-            pass
+        print(f"处理音频文件失败: {e}")
         return False
 
 
-def replace_video_audio(video_path: str, audio_path: str, output_path: str) -> bool:
-    """替换视频中的音频"""
+def replace_video_audio(video_path: str, audio: np.ndarray, output_path: str,
+                        sr: int = 48000) -> bool:
+    """把降噪后音频 (numpy) 封装回视频: 视频流直接拷贝, 音频重编码 AAC (无临时文件)。"""
     try:
-        print(f"[DEBUG] replace_video_audio: 开始替换音频，视频: {video_path}, 音频: {audio_path}, 输出: {output_path}")
-        
-        # 检查输入文件是否存在
-        if not os.path.exists(video_path):
-            print(f"[DEBUG] replace_video_audio: 错误: 视频文件不存在: {video_path}")
-            return False
-        if not os.path.exists(audio_path):
-            print(f"[DEBUG] replace_video_audio: 错误: 音频文件不存在: {audio_path}")
-            return False
-        
-        print(f"[DEBUG] replace_video_audio: 输入文件检查通过")
-        ffmpeg_path = get_ffmpeg_path()
-        print(f"[DEBUG] replace_video_audio: 使用ffmpeg路径: {ffmpeg_path}")
-        
-        # 修改ffmpeg命令，使用更兼容的参数
-        cmd = [
-            ffmpeg_path, '-i', video_path, '-i', audio_path, 
-            '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k', 
-            '-strict', 'experimental', '-map', '0:v:0', '-map', '1:a:0', 
-            output_path, '-y'
-        ]
-        print(f"[DEBUG] replace_video_audio: 执行命令: {' '.join(cmd)}")
-        
-        # 添加startupinfo参数来隐藏黑框
-        si = None
-        if sys.platform == "win32":
-            si = subprocess.STARTUPINFO()
-            si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-            print(f"[DEBUG] replace_video_audio: 使用Windows隐藏窗口模式")
-        
-        # 捕获输出以进行调试
-        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, startupinfo=si)
-        
-        print(f"[DEBUG] replace_video_audio: 命令执行完成，返回码: {result.returncode}")
-        
-        if result.returncode != 0:
-            print(f"[DEBUG] replace_video_audio: 错误: ffmpeg执行失败")
-            print(f"[DEBUG] replace_video_audio: 标准输出: {result.stdout.decode('utf-8', errors='ignore')}")
-            print(f"[DEBUG] replace_video_audio: 错误输出: {result.stderr.decode('utf-8', errors='ignore')}")
-            return False
-        
-        # 检查输出文件是否存在且不为空
-        if os.path.exists(output_path):
-            file_size = os.path.getsize(output_path)
-            print(f"[DEBUG] replace_video_audio: 输出文件存在，大小: {file_size} 字节")
-            if file_size > 0:
-                # 检查原始视频大小
-                orig_size = os.path.getsize(video_path)
-                print(f"[DEBUG] replace_video_audio: 原始视频大小: {orig_size} 字节")
-                return True
-            else:
-                print(f"[DEBUG] replace_video_audio: 警告: 输出文件存在但为空")
-                return False
-        else:
-            print(f"[DEBUG] replace_video_audio: 错误: 输出文件不存在: {output_path}")
-            return False
-            
+        inp = av.open(video_path)
+        out = av.open(output_path, 'w')
+        try:
+            in_v = inp.streams.video[0]
+            out_v = out.add_stream_from_template(in_v)
+            out_a = out.add_stream('aac', rate=sr)
+            out_a.layout = 'mono'
+            out_a.bit_rate = 192000
+            frame_size = out_a.codec_context.frame_size or 1024
+            n = len(audio)
+            for i in range(0, n, frame_size):
+                seg = audio[i:i + frame_size]
+                if len(seg) < frame_size:
+                    seg = np.pad(seg, (0, frame_size - len(seg)))
+                af = av.AudioFrame.from_ndarray(seg.reshape(1, -1).astype('float32'),
+                                                format='flt', layout='mono')
+                af.sample_rate = sr
+                af.pts = i
+                af.time_base = Fraction(1, sr)
+                for pkt in out_a.encode(af):
+                    out.mux(pkt)
+            for pkt in out_a.encode(None):
+                out.mux(pkt)
+            for pkt in inp.demux(in_v):
+                if pkt.dts is None:
+                    continue
+                pkt.stream = out_v
+                out.mux(pkt)
+        finally:
+            out.close()
+            inp.close()
+        return os.path.exists(output_path) and os.path.getsize(output_path) > 0
     except Exception as e:
-        print(f"[DEBUG] replace_video_audio: 异常: {str(e)}")
+        print(f"封装视频失败: {e}")
         return False
 
 def process_media_file(input_path: str, output_dir: str, model_path: str, progress_callback=None, output_sr: int = None) -> Tuple[bool, str]:
-    """处理媒体文件"""
+    """处理媒体文件 (音频: 流式解码→降噪→写 WAV; 视频: 解码到内存→降噪→流拷贝封装)。"""
     try:
-        # 检查文件类型
         ext = os.path.splitext(input_path)[1].lower()
         is_video = ext in VIDEO_FORMATS
         is_audio = ext in AUDIO_FORMATS
-        
         if not is_video and not is_audio:
             return False, "不支持的文件格式"
-        
-        # 生成输出路径
+
         random_hex = ''.join(random.choices(string.hexdigits, k=8)).lower()
         base_name = os.path.splitext(os.path.basename(input_path))[0]
         output_ext = '.mp4' if is_video else '.wav'
         output_path = os.path.join(output_dir, f"{base_name}_降噪_{random_hex}{output_ext}")
-        
-        # 添加调试日志
-        print(f"[DEBUG] 处理文件: {input_path}")
-        print(f"[DEBUG] 是视频文件: {is_video}, 是音频文件: {is_audio}")
-        print(f"[DEBUG] 输出路径: {output_path}")
-        
+
         if is_video:
-            # 提取音频
-            temp_audio_path = os.path.join(output_dir, f"temp_{random_hex}.wav")
-            print(f"[DEBUG] 开始提取音频到: {temp_audio_path}")
-            if not extract_audio(input_path, temp_audio_path):
-                print(f"[DEBUG] 提取音频失败")
-                return False, "提取音频失败"
-            
-            # 检查提取的音频文件是否存在且不为空
-            if not os.path.exists(temp_audio_path):
-                print(f"[DEBUG] 错误: 提取的音频文件不存在: {temp_audio_path}")
-                return False, f"提取的音频文件不存在: {temp_audio_path}"
-            if os.path.getsize(temp_audio_path) == 0:
-                print(f"[DEBUG] 错误: 提取的音频文件为空: {temp_audio_path}")
-                return False, f"提取的音频文件为空: {temp_audio_path}"
-            print(f"[DEBUG] 音频提取成功，文件大小: {os.path.getsize(temp_audio_path)} 字节")
-            
-            # 处理音频
-            temp_processed_audio_path = os.path.join(output_dir, f"temp_processed_{random_hex}.wav")
-            print(f"[DEBUG] 开始处理音频: {temp_audio_path} -> {temp_processed_audio_path}")
-            if not process_audio_file(temp_audio_path, temp_processed_audio_path, model_path, progress_callback, output_sr=output_sr):
-                print(f"[DEBUG] 处理音频失败")
-                os.remove(temp_audio_path)
-                return False, "处理音频失败"
-            
-            # 检查处理后的音频文件是否存在且不为空
-            if not os.path.exists(temp_processed_audio_path):
-                print(f"[DEBUG] 错误: 处理后的音频文件不存在: {temp_processed_audio_path}")
-                os.remove(temp_audio_path)
-                return False, f"处理后的音频文件不存在: {temp_processed_audio_path}"
-            if os.path.getsize(temp_processed_audio_path) == 0:
-                print(f"[DEBUG] 错误: 处理后的音频文件为空: {temp_processed_audio_path}")
-                os.remove(temp_audio_path)
-                os.remove(temp_processed_audio_path)
-                return False, f"处理后的音频文件为空: {temp_processed_audio_path}"
-            print(f"[DEBUG] 音频处理成功，文件大小: {os.path.getsize(temp_processed_audio_path)} 字节")
-            
-            # 替换视频音频
-            print(f"[DEBUG] 开始替换视频音频: {input_path} + {temp_processed_audio_path} -> {output_path}")
-            if not replace_video_audio(input_path, temp_processed_audio_path, output_path):
-                print(f"[DEBUG] 替换视频音频失败")
-                os.remove(temp_audio_path)
-                os.remove(temp_processed_audio_path)
+            audio = decode_mono48k(input_path)
+            if len(audio) == 0:
+                return False, "视频没有音频流"
+            enhanced = denoise_array(audio, model_path, progress_callback=progress_callback)
+            if output_sr and output_sr != 48000:
+                from scipy.signal import resample_poly
+                from math import gcd
+                g = gcd(48000, output_sr)
+                enhanced = resample_poly(enhanced, output_sr // g, 48000 // g).astype(np.float32)
+                audio_sr = output_sr
+            else:
+                audio_sr = 48000
+            if not replace_video_audio(input_path, enhanced, output_path, sr=audio_sr):
                 return False, "替换视频音频失败"
-            
-            # 检查输出视频文件是否存在
-            if not os.path.exists(output_path):
-                print(f"[DEBUG] 错误: 输出视频文件不存在: {output_path}")
-                os.remove(temp_audio_path)
-                os.remove(temp_processed_audio_path)
-                return False, f"输出视频文件不存在: {output_path}"
-            print(f"[DEBUG] 视频音频替换成功，输出文件大小: {os.path.getsize(output_path)} 字节")
-            
-            # 清理临时文件
-            os.remove(temp_audio_path)
-            os.remove(temp_processed_audio_path)
-            print(f"[DEBUG] 清理临时文件成功")
         else:
-            # 处理音频文件
-            print(f"[DEBUG] 开始处理音频文件: {input_path} -> {output_path}")
-            if not process_audio_file(input_path, output_path, model_path, progress_callback, output_sr=output_sr):
-                print(f"[DEBUG] 处理音频文件失败")
+            if not process_audio_file(input_path, output_path, model_path,
+                                      progress_callback, output_sr=output_sr):
                 return False, "处理音频失败"
-            print(f"[DEBUG] 音频文件处理成功，输出文件大小: {os.path.getsize(output_path)} 字节")
-        
+
         return True, output_path
     except Exception as e:
         print(f"[DEBUG] 处理过程中发生异常: {str(e)}")
@@ -807,10 +826,7 @@ if __name__ == "__main__":
                 base, ext = os.path.splitext(args.input)
                 output_path = f"{base}_denoised.wav"
 
-            output_sr = args.sr
-            if not output_sr:
-                info = sf.info(args.input)
-                output_sr = info.samplerate
+            output_sr = args.sr or probe_samplerate(args.input)
 
             print(f"Input:  {args.input}")
             print(f"Output: {output_path} ({output_sr}Hz)")

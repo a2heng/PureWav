@@ -87,6 +87,27 @@ def prepare(audio, fs=FS):
     return display, edges, times
 
 
+def waveform_envelope(audio, fs=FS, max_points=2000):
+    """音频 → (t, lo, hi): 分段 min/max 包络, 用于 ±1 满幅波形。
+
+    把整段音频等分成约 max_points 段, 每段取最小/最大值, 既保留瞬态又极少点数。
+    """
+    if audio.ndim > 1:
+        audio = audio[:, 0]
+    audio = np.asarray(audio, dtype=np.float32)
+    n = len(audio)
+    if n == 0:
+        z = np.zeros(0, dtype=np.float32)
+        return z, z, z
+    step = max(1, n // max_points)
+    trim = (n // step) * step
+    seg = audio[:trim].reshape(-1, step)
+    lo = seg.min(axis=1)
+    hi = seg.max(axis=1)
+    t = (np.arange(seg.shape[0]) + 0.5) * step / fs
+    return t, lo, hi
+
+
 def plot_spectrogram(audio, ax, title="Spectrogram", fs=FS, vmin=VMIN, vmax=VMAX):
     """把整段音频的频谱画到给定 matplotlib Axes (混合轴)。"""
     display, edges, times = prepare(audio, fs)
