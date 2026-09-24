@@ -21,7 +21,7 @@ HOP = 480
 BAND_LO_HZ = 20000       # 混合轴分界: 低于此逐 bin 线性
 BAND_HI_HZ = 24000       # 最高频 (nyquist)
 BAND_WIDTH_HZ = 1000     # 20–24 kHz 按 1 kHz 分带
-VMIN, VMAX = -80.0, 0.0  # dB 色标 (同 web)
+VMIN, VMAX = -90.0, -10.0  # dB 色标上下界 (对齐 audioscope 标准)
 CMAP = "inferno"
 
 
@@ -39,6 +39,9 @@ def compute_spectrogram(audio, fs=FS, n_fft=N_FFT, hop=HOP):
                 np.arange(n_freq) * fs / n_fft, np.zeros(1, dtype=np.float32))
 
     window = np.hanning(n_fft).astype(np.float32)
+    # 窗相干增益归一: 满幅单音峰值 → 0 dB (同 audioscope power_scale)
+    half_win_sum = float(window.sum()) * 0.5
+    power_scale = 1.0 / max(half_win_sum * half_win_sum, 1e-12)
     n_frames = 1 + (len(audio) - n_fft) // hop
     mag_db = np.empty((n_freq, n_frames), dtype=np.float32)
 
@@ -48,7 +51,11 @@ def compute_spectrogram(audio, fs=FS, n_fft=N_FFT, hop=HOP):
         idx = start + np.arange(stop - start)
         frames = np.stack([audio[i * hop:i * hop + n_fft] for i in idx])
         spec = np.fft.rfft(frames * window, n=n_fft, axis=1)      # (b, F)
-        mag_db[:, start:stop] = (20.0 * np.log10(np.abs(spec) + 1e-12)).T
+        power = (np.abs(spec) ** 2) * power_scale
+        mag_db[:, start:stop] = (10.0 * np.log10(power + 1e-14)).T
+    # DC / Nyquist 置零 (同 audioscope)
+    mag_db[0, :] = VMIN
+    mag_db[-1, :] = VMIN
 
     freqs = np.arange(n_freq) * fs / n_fft
     times = np.arange(n_frames) * hop / fs
@@ -71,7 +78,9 @@ def hybrid_axis(mag_db, freqs):
     if lo < n_freq:
         n_bands = max(1, int(round((f_max - BAND_LO_HZ) / BAND_WIDTH_HZ)))  # 4
         groups = np.array_split(np.arange(lo, n_freq), n_bands)
-        hi = np.stack([mag_db[g].mean(axis=0) for g in groups])
+        # 带内取功率均值再转 dB (同 audioscope computeBandMeanPower), 而非 dB 均值
+        hi = np.stack([10.0 * np.log10(np.mean(10.0 ** (mag_db[g] / 10.0), axis=0) + 1e-14)
+                       for g in groups])
         hi_edges = np.linspace(BAND_LO_HZ, f_max, n_bands + 1)  # 20k,21k,22k,23k,24k
         display = np.concatenate([lin, hi], axis=0)
         edges = np.concatenate([lin_edges, hi_edges[1:]])

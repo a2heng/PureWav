@@ -6,7 +6,7 @@
   const $ = (s) => document.querySelector(s);
   const FS = 48000, NFFT = 960, HOP = 480, BINS = NFFT / 2 + 1; // 481
   const BAND_LO = 20000, BAND_HI = 24000, BAND_W = 1000;
-  const VMIN = -80, VMAX = 0;
+  const VMIN = -90, VMAX = -10;   // 显示上下界 (对齐 audioscope: power 归一后 10·log10)
   const ROWS_LIN = BAND_LO / (FS / NFFT);       // 400
   const ROWS_BAND = (BAND_HI - BAND_LO) / BAND_W; // 4
   const ROWS = ROWS_LIN + ROWS_BAND;            // 404
@@ -128,6 +128,9 @@
   // ── 单段: STFT → 推理 → ISTFT + 显示谱 ─────────────────
   async function denoise(x) {
     const win = hann(NFFT);
+    // 窗相干增益归一: 满幅单音峰值 → 0 dB (同 audioscope power_scale)
+    let winSumCoherent = 0; for (let i = 0; i < NFFT; i++) winSumCoherent += win[i];
+    const powerScale = 1 / ((winSumCoherent / 2) * (winSumCoherent / 2));
     const bs = new Bluestein(NFFT);
     const re = new Float64Array(NFFT), im = new Float64Array(NFFT);
     const fRe = new Float64Array(BINS), fIm = new Float64Array(BINS);
@@ -156,24 +159,31 @@
       }
     }
     const rowBuf = new Float32Array(ROWS);
-    function hybridRow(dbmag) {
-      for (let r = 0; r < ROWS_LIN; r++) rowBuf[r] = dbmag[r];
+    // 输入为每 bin 功率; 带内取 taper 加权平均功率 (同 audioscope computeBandMeanPower)
+    function hybridRow(pow) {
+      for (let r = 0; r < ROWS_LIN; r++) rowBuf[r] = pow[r];
       for (let b = 0; b < ROWS_BAND; b++) {
-        const [a, e] = bandGroups[b]; let s = 0;
-        for (let i = a; i < e; i++) s += dbmag[i];
-        rowBuf[ROWS_LIN + b] = s / (e - a);
+        const [a, e] = bandGroups[b], size = Math.max(1, e - a);
+        let num = 0, den = 0;
+        for (let i = a; i < e; i++) {
+          const pos = size === 1 ? 0.5 : ((i - a) + 0.5) / size;
+          const w = 0.7 + (1 - Math.abs(pos * 2 - 1)) * 0.3;
+          num += pow[i] * w; den += w;
+        }
+        rowBuf[ROWS_LIN + b] = num / Math.max(den, 1e-8);
       }
       return rowBuf;
     }
 
     let gFrame = 0;
-    function accumulate(dbmag, arr) {
-      const c = Math.floor(gFrame / pool);
+    // 把某一帧写进池化后的显示列 (原图/降噪后各自调用, 用同一 frameIdx 保证对齐)
+    function addCol(frameIdx, dbmag, arr) {
+      const c = Math.floor(frameIdx / pool);
       if (c < dispCols) {
         const base = c * ROWS, row = hybridRow(dbmag);
         for (let r = 0; r < ROWS; r++) arr[base + r] += row[r];
       }
-      if (arr === dispD) { cnt[Math.min(dispCols - 1, c)]++; gFrame++; }
+      return c;
     }
 
     for (let start = 0; start < x.length; start += chunkSamples) {
@@ -190,10 +200,11 @@
         bs.transform(re, null, fRe, fIm);
         const base = t * BINS;
         for (let k = 0; k < BINS; k++) { specRe[base + k] = fRe[k]; specIm[base + k] = fIm[k]; }
-        // 显示谱 (原图)
-        const db = new Float32Array(BINS);
-        for (let k = 0; k < BINS; k++) db[k] = 20 * Math.log10(Math.hypot(fRe[k], fIm[k]) + 1e-12);
-        accumulate(db, dispO);
+        // 显示谱 (原图): 每 bin 功率
+        const pw = new Float32Array(BINS);
+        for (let k = 0; k < BINS; k++) pw[k] = (fRe[k] * fRe[k] + fIm[k] * fIm[k]) * powerScale;
+        pw[0] = 0; pw[BINS - 1] = 0;
+        addCol(gFrame + t, pw, dispO);
       }
 
       // 推理
@@ -230,11 +241,17 @@
           acc[o + i] += v * win[i];
           accW[o + i] += win[i] * win[i];
         }
-        // 显示谱 (降噪后)
-        const db = new Float32Array(BINS);
-        for (let k = 0; k < BINS; k++) db[k] = 20 * Math.log10(Math.hypot(od[b + k], od[plane + b + k]) + 1e-12);
-        accumulate(db, dispD);
+        // 显示谱 (降噪后): 每 bin 功率
+        const pw = new Float32Array(BINS);
+        for (let k = 0; k < BINS; k++) {
+          const rr = od[b + k], ii = od[plane + b + k];
+          pw[k] = (rr * rr + ii * ii) * powerScale;
+        }
+        pw[0] = 0; pw[BINS - 1] = 0;
+        const c = addCol(gFrame + t, pw, dispD);
+        if (c < dispCols) cnt[c]++;
       }
+      gFrame += nFrames;
       const m = Math.min(seg.length, segLen);
       for (let i = 0; i < m; i++) {
         const w = accW[i] > 1e-8 ? accW[i] : 1e-8;
@@ -262,7 +279,8 @@
     const rng = VMAX - VMIN;
     for (let x = 0; x < cols; x++) {
       for (let r = 0; r < ROWS; r++) {
-        let v = (disp[x * ROWS + r] - VMIN) / rng; v = v < 0 ? 0 : v > 1 ? 1 : v;
+        const db = 10 * Math.log10(disp[x * ROWS + r] + 1e-14);   // power → dB
+        let v = (db - VMIN) / rng; v = v < 0 ? 0 : v > 1 ? 1 : v;
         const idx = (Math.round(v * 255)) * 3;
         const o = ((ROWS - 1 - r) * cols + x) * 4;
         img.data[o] = cmap[idx]; img.data[o + 1] = cmap[idx + 1]; img.data[o + 2] = cmap[idx + 2];

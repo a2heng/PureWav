@@ -34,6 +34,9 @@ Same command without `--noconsole` (keeps console window for debug output).
   onnxruntime-web 推理 → ISTFT → WAV 导出；Bluestein FFT 处理非 2 的幂的 960 点
 - 依赖 onnxruntime-web 的 dist（`web/.ort/` 或 `--ort` 指定）；与 Python 输出数值一致（corr≈1.0）
 - 单文件拖拽；左侧「原图」右侧「降噪后」各上波形(±1)下频谱(Canvas 2D，无 PIL)
+- 频谱色标以 audioscope (`~/audioscope/src-wasm/wasm_core/spectrogram.zig`) 为标准：
+  power = |X|² / (sum(win)/2)² (满幅单音=0dB)，带内 taper 加权平均功率，
+  db = 10·log10(power)，归一化到 `[VMIN, VMAX] = [-90, -10]`（桌面 spectrum_viz.py 同步此标准）
 
 ## Key Architecture
 
