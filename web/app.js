@@ -136,8 +136,9 @@
     const fRe = new Float64Array(BINS), fIm = new Float64Array(BINS);
 
     const totalFrames = Math.max(1, 1 + Math.floor((x.length - NFFT) / HOP));
+    // 显示列数 = min(上限, 总帧数); 帧按 frameIdx*cols/totalFrames 均匀落列,
+    // 保证恰好铺满 cols 列 (旧写法 pool=ceil 会让右侧留空)
     const dispCols = Math.min(MAX_COLS, totalFrames);
-    const pool = Math.max(1, Math.ceil(totalFrames / dispCols));
     const dispO = new Float32Array(ROWS * dispCols);
     const dispD = new Float32Array(ROWS * dispCols);
     const cnt = new Float32Array(dispCols);
@@ -176,9 +177,9 @@
     }
 
     let gFrame = 0;
-    // 把某一帧写进池化后的显示列 (原图/降噪后各自调用, 用同一 frameIdx 保证对齐)
+    // 把某一帧写进显示列 (原图/降噪后各自调用, 用同一 frameIdx 保证对齐)
     function addCol(frameIdx, dbmag, arr) {
-      const c = Math.floor(frameIdx / pool);
+      const c = Math.min(dispCols - 1, Math.floor(frameIdx * dispCols / totalFrames));
       if (c < dispCols) {
         const base = c * ROWS, row = hybridRow(dbmag);
         for (let r = 0; r < ROWS; r++) arr[base + r] += row[r];
