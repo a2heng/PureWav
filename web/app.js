@@ -4,17 +4,18 @@
 'use strict';
 (function () {
   const $ = (s) => document.querySelector(s);
-  const FS = 48000, NFFT = 960, HOP = 480, BINS = NFFT / 2 + 1; // 481
-  const BAND_LO = 20000, BAND_HI = 24000, BAND_W = 1000;
-  const VMIN = -90, VMAX = -10;   // 显示上下界 (对齐 audioscope: power 归一后 10·log10)
-  const ROWS_LIN = BAND_LO / (FS / NFFT);       // 400
-  const ROWS_BAND = (BAND_HI - BAND_LO) / BAND_W; // 4
-  const ROWS = ROWS_LIN + ROWS_BAND;            // 404
+  const FS = 48000, NFFT = 960, HOP = 480, BINS = NFFT / 2 + 1; // 481（推理 STFT，模型契约，不动）
+  // ── 展示谱配置（wav_browser 同款）：FFT4096 / 50%交叠 / 20Hz起 /
+  // 1kHz pivot 上下各 256 行（下线性上对数）/ magma / 相对参考 -80~0dB ──
+  const SP_NFFT = 4096, SP_HOP = 2048, SP_ROWS = 512;
+  const SP_MAX_COLS = 2000, SP_WAVE_COLS = 3200, SP_WAVE_PAD = 10;
+  const SP_FMIN = 20, SP_FMAX = 24000, SP_PIVOT = 1000, SP_PIVOT_RATIO = 0.5;
+  const SP_DB_LO = -80, SP_DB_HI = 0;
   const CHUNK_SEC = 15;                          // 每段推理时长
-  const MAX_COLS = 2000;                         // 频谱显示最大列数
 
-  let session = null, modelBytes = null, cmap = null;
+  let session = null, modelBytes = null;
   let srcBuf = null, denBuf = null, srcName = 'audio';
+  let lastView = null;   // {vO, vD, dur}：resize 只重画，不重算
   let actx = null, playSrc = null, playWhich = null, playStart = 0, playOff = 0;
 
   // ── 工具 ──────────────────────────────────────────────
@@ -108,6 +109,105 @@
     return w;
   }
 
+  // ── 混合滤波器组（下线性 FMIN→pivot，上对数 pivot→fmaxEff；fmaxEff 钳到 Nyquist）──
+  // 行幅度 = 三角 taper 加权平均功率（w=0.7+0.3*taper，按权重和归一）
+  let _spWin = null, _spBank = null;
+  function spBank(sr) {
+    if (_spBank && _spBank.sr === sr) return _spBank;
+    const nyq = sr / 2, maxBin = Math.max(2, SP_NFFT >> 1), rows = SP_ROWS;
+    const fmaxEff = Math.min(SP_FMAX, nyq);
+    const pivot = Math.min(Math.max(SP_PIVOT, SP_FMIN + 1), fmaxEff);
+    const freqAt = (ratio) => {
+      if (ratio <= SP_PIVOT_RATIO || pivot >= fmaxEff)
+        return SP_FMIN + (pivot - SP_FMIN) * Math.min(1, ratio / SP_PIVOT_RATIO);
+      const ur = (ratio - SP_PIVOT_RATIO) / (1 - SP_PIVOT_RATIO);
+      return pivot * Math.exp(Math.log(fmaxEff / pivot) * ur);
+    };
+    const band = [];
+    for (let r = 0; r < rows; r++) {
+      const f0 = Math.max(1.0, freqAt(r / rows)), f1 = Math.max(f0 + 1.0, freqAt((r + 1) / rows));
+      const b0 = Math.min(Math.max(Math.floor((f0 / nyq) * maxBin), 1), maxBin - 1);
+      const b1 = Math.min(Math.max(Math.ceil((f1 / nyq) * maxBin), b0 + 1), maxBin);
+      band.push({ start: b0, end: b1 });
+    }
+    _spBank = { sr, band, rows, fmaxEff };
+    return _spBank;
+  }
+
+  function spMagma(v) {
+    const s = [[0, 0, 4], [28, 16, 68], [79, 18, 123], [129, 37, 129], [181, 54, 122], [229, 80, 100], [251, 135, 97], [254, 194, 135], [252, 253, 191]];
+    const x = v * (s.length - 1), i = Math.min(s.length - 2, Math.floor(x)), f = x - i, a = s[i], b = s[i + 1];
+    return [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f, a[2] + (b[2] - a[2]) * f];
+  }
+
+  // 整段 PCM → 波形峰值对 + 混合谱（dB，ref 为外部参考；null 则取自身峰）。
+  // 原图先算（定参考），降噪后跟随同一参考，两图同量程可比。
+  function spAnalyze(y, sr, ref) {
+    const bank = spBank(sr), rows = bank.rows, n = y.length;
+    const w = Math.min(SP_WAVE_COLS, Math.max(1, n));
+    const wf = new Float32Array(w * 2);
+    for (let i = 0; i < w; i++) {
+      const a = Math.floor(i * n / w), b = Math.max(a + 1, Math.floor((i + 1) * n / w));
+      let mn = 1e9, mx = -1e9;
+      for (let k = a; k < b; k++) { const v = y[k]; if (v < mn) mn = v; if (v > mx) mx = v; }
+      wf[i * 2] = mn; wf[i * 2 + 1] = mx;
+    }
+    const nWin = Math.max(1, Math.round(n / SP_HOP));
+    const merge = Math.max(1, Math.ceil(nWin / SP_MAX_COLS));
+    const cols = Math.max(1, Math.ceil(nWin / merge));
+    if (!_spWin) { _spWin = new Float64Array(SP_NFFT); for (let i = 0; i < SP_NFFT; i++) _spWin[i] = 0.5 - 0.5 * Math.cos(2 * Math.PI * i / SP_NFFT); }
+    const win = _spWin;
+    const re = new Float64Array(SP_NFFT), im = new Float64Array(SP_NFFT);
+    const frames = new Float32Array(cols * rows);
+    for (let c = 0; c < cols; c++) {
+      const acc = new Float64Array(rows), cnt = merge;
+      for (let m2 = 0; m2 < merge; m2++) {
+        const col = c * merge + m2;
+        const centre = ((2 * col + 1) * n) / (2 * nWin);
+        const s0 = Math.round(centre) - (SP_NFFT >> 1);
+        re.fill(0); im.fill(0);
+        for (let i = 0; i < SP_NFFT; i++) { const idx = s0 + i; if (idx >= 0 && idx < n) re[i] = y[idx] * win[i]; }
+        fftPow2(re, im, false);
+        for (let r = 0; r < rows; r++) {
+          const bd = bank.band[r];
+          const sz = Math.max(1, bd.end - bd.start), ps = 1.0 / sz;
+          let e = 0, tw = 0;
+          for (let b = bd.start; b < bd.end; b++) {
+            const pos = sz === 1 ? 0.5 : ((b - bd.start) + 0.5) * ps;
+            const taper = 1.0 - Math.abs(pos * 2.0 - 1.0);
+            const wt = 0.7 + taper * 0.3;
+            e += (re[b] * re[b] + im[b] * im[b]) * wt; tw += wt;
+          }
+          acc[r] += e / Math.max(tw, 1e-8);
+        }
+      }
+      for (let r = 0; r < rows; r++) frames[r * cols + c] = acc[r] / cnt;
+    }
+    let dmax = ref;
+    const db = new Float32Array(cols * rows);
+    for (let i = 0; i < db.length; i++) db[i] = 10 * Math.log10(frames[i] + 1e-10);
+    if (ref == null) { dmax = -1e9; for (let i = 0; i < db.length; i++) if (db[i] > dmax) dmax = db[i]; }
+    const lo = dmax + SP_DB_LO, rng = Math.max(SP_DB_HI - SP_DB_LO, 1e-6);
+    const data = new Uint8Array(cols * rows);
+    for (let i = 0; i < db.length; i++) { let v = (db[i] - lo) / rng; v = v < 0 ? 0 : v > 1 ? 1 : v; data[i] = Math.round(v * 255); }
+    return { cols, rows, data, wf, wfCols: w, ref: dmax, fmaxEff: bank.fmaxEff };
+  }
+
+  function spSpecImage(data, rows, cols) {
+    const cv = document.createElement('canvas');
+    cv.width = cols; cv.height = rows;
+    const g = cv.getContext('2d'), img = g.createImageData(cols, rows);
+    for (let y = 0; y < rows; y++) {
+      const row = rows - 1 - y;
+      for (let x = 0; x < cols; x++) {
+        const v = data[row * cols + x] / 255, c = spMagma(v), o = (y * cols + x) * 4;
+        img.data[o] = c[0]; img.data[o + 1] = c[1]; img.data[o + 2] = c[2]; img.data[o + 3] = 255;
+      }
+    }
+    g.putImageData(img, 0, 0);
+    return cv;
+  }
+
   // ── 解码 + 重采样为 48k 单声道 ─────────────────────────
   async function decodeToMono48k(file) {
     const arr = await file.arrayBuffer();
@@ -125,67 +225,16 @@
     return rendered.getChannelData(0).slice(); // 拷贝为独立 Float32Array
   }
 
-  // ── 单段: STFT → 推理 → ISTFT + 显示谱 ─────────────────
+  // ── 单段: STFT → 推理 → ISTFT（展示谱在外部整段另算，不在此处）──
   async function denoise(x) {
     const win = hann(NFFT);
-    // 窗相干增益归一: 满幅单音峰值 → 0 dB (同 audioscope power_scale)
-    let winSumCoherent = 0; for (let i = 0; i < NFFT; i++) winSumCoherent += win[i];
-    const powerScale = 1 / ((winSumCoherent / 2) * (winSumCoherent / 2));
     const bs = new Bluestein(NFFT);
     const re = new Float64Array(NFFT), im = new Float64Array(NFFT);
     const fRe = new Float64Array(BINS), fIm = new Float64Array(BINS);
 
-    const totalFrames = Math.max(1, 1 + Math.floor((x.length - NFFT) / HOP));
-    // 显示列数 = min(上限, 总帧数); 帧按 frameIdx*cols/totalFrames 均匀落列,
-    // 保证恰好铺满 cols 列 (旧写法 pool=ceil 会让右侧留空)
-    const dispCols = Math.min(MAX_COLS, totalFrames);
-    const dispO = new Float32Array(ROWS * dispCols);
-    const dispD = new Float32Array(ROWS * dispCols);
-    const cnt = new Float32Array(dispCols);
-
     const out = new Float32Array(x.length);
-    const winSum = new Float32Array(x.length);
     const chunkSamples = CHUNK_SEC * FS;
     const invN = 1 / NFFT;
-
-    // 混合轴行映射: 400 线性 bin + 4 个 1kHz 带(带内均值)
-    const bandGroups = [];
-    {
-      const lo = ROWS_LIN;
-      const nBins = BINS - lo; // 81
-      for (let b = 0; b < ROWS_BAND; b++) {
-        const a = lo + Math.floor(b * nBins / ROWS_BAND);
-        const e = lo + Math.floor((b + 1) * nBins / ROWS_BAND);
-        bandGroups.push([a, Math.max(a + 1, e)]);
-      }
-    }
-    const rowBuf = new Float32Array(ROWS);
-    // 输入为每 bin 功率; 带内取 taper 加权平均功率 (同 audioscope computeBandMeanPower)
-    function hybridRow(pow) {
-      for (let r = 0; r < ROWS_LIN; r++) rowBuf[r] = pow[r];
-      for (let b = 0; b < ROWS_BAND; b++) {
-        const [a, e] = bandGroups[b], size = Math.max(1, e - a);
-        let num = 0, den = 0;
-        for (let i = a; i < e; i++) {
-          const pos = size === 1 ? 0.5 : ((i - a) + 0.5) / size;
-          const w = 0.7 + (1 - Math.abs(pos * 2 - 1)) * 0.3;
-          num += pow[i] * w; den += w;
-        }
-        rowBuf[ROWS_LIN + b] = num / Math.max(den, 1e-8);
-      }
-      return rowBuf;
-    }
-
-    let gFrame = 0;
-    // 把某一帧写进显示列 (原图/降噪后各自调用, 用同一 frameIdx 保证对齐)
-    function addCol(frameIdx, dbmag, arr) {
-      const c = Math.min(dispCols - 1, Math.floor(frameIdx * dispCols / totalFrames));
-      if (c < dispCols) {
-        const base = c * ROWS, row = hybridRow(dbmag);
-        for (let r = 0; r < ROWS; r++) arr[base + r] += row[r];
-      }
-      return c;
-    }
 
     for (let start = 0; start < x.length; start += chunkSamples) {
       const seg = x.subarray(start, Math.min(x.length, start + chunkSamples));
@@ -201,11 +250,6 @@
         bs.transform(re, null, fRe, fIm);
         const base = t * BINS;
         for (let k = 0; k < BINS; k++) { specRe[base + k] = fRe[k]; specIm[base + k] = fIm[k]; }
-        // 显示谱 (原图): 每 bin 功率
-        const pw = new Float32Array(BINS);
-        for (let k = 0; k < BINS; k++) pw[k] = (fRe[k] * fRe[k] + fIm[k] * fIm[k]) * powerScale;
-        pw[0] = 0; pw[BINS - 1] = 0;
-        addCol(gFrame + t, pw, dispO);
       }
 
       // 推理
@@ -242,17 +286,7 @@
           acc[o + i] += v * win[i];
           accW[o + i] += win[i] * win[i];
         }
-        // 显示谱 (降噪后): 每 bin 功率
-        const pw = new Float32Array(BINS);
-        for (let k = 0; k < BINS; k++) {
-          const rr = od[b + k], ii = od[plane + b + k];
-          pw[k] = (rr * rr + ii * ii) * powerScale;
-        }
-        pw[0] = 0; pw[BINS - 1] = 0;
-        const c = addCol(gFrame + t, pw, dispD);
-        if (c < dispCols) cnt[c]++;
       }
-      gFrame += nFrames;
       const m = Math.min(seg.length, segLen);
       for (let i = 0; i < m; i++) {
         const w = accW[i] > 1e-8 ? accW[i] : 1e-8;
@@ -264,32 +298,12 @@
       await new Promise((r) => setTimeout(r, 0));
     }
 
-    // 池化平均
-    for (let c = 0; c < dispCols; c++) {
-      const n = cnt[c] || 1, base = c * ROWS;
-      for (let r = 0; r < ROWS; r++) { dispO[base + r] /= n; dispD[base + r] /= n; }
-    }
-    return { out, dispO, dispD, dispCols };
+    return { out };
   }
 
-  // ── 频谱绘制 ──────────────────────────────────────────
+  // ── 频谱绘制（magma；上 24k → 中 1k → 下 20Hz；右上 0dB、右下 -80dB）──
   function specCanvas(disp, cols) {
-    const cv = document.createElement('canvas');
-    cv.width = cols; cv.height = ROWS;
-    const g = cv.getContext('2d'), img = g.createImageData(cols, ROWS);
-    const rng = VMAX - VMIN;
-    for (let x = 0; x < cols; x++) {
-      for (let r = 0; r < ROWS; r++) {
-        const db = 10 * Math.log10(disp[x * ROWS + r] + 1e-14);   // power → dB
-        let v = (db - VMIN) / rng; v = v < 0 ? 0 : v > 1 ? 1 : v;
-        const idx = (Math.round(v * 255)) * 3;
-        const o = ((ROWS - 1 - r) * cols + x) * 4;
-        img.data[o] = cmap[idx]; img.data[o + 1] = cmap[idx + 1]; img.data[o + 2] = cmap[idx + 2];
-        img.data[o + 3] = 255;
-      }
-    }
-    g.putImageData(img, 0, 0);
-    return cv;
+    return spSpecImage(disp, SP_ROWS, cols);
   }
   function drawSpec(canvas, spec) {
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
@@ -300,19 +314,19 @@
     g.imageSmoothingEnabled = false;
     g.clearRect(0, 0, canvas.width, canvas.height);
     if (spec) g.drawImage(spec, 0, 0, spec.width, spec.height, 0, 0, canvas.width, canvas.height);
-    // 轴标注 (小字, 图内)
     g.font = (11 * dpr) + 'px sans-serif'; g.textBaseline = 'top';
     g.fillStyle = 'rgba(235,235,235,.85)';
     g.fillText('24k', 5 * dpr, 3 * dpr);
-    g.fillText('20k', 5 * dpr, canvas.height * (ROWS_LIN / ROWS) - 13 * dpr);
-    g.fillText('0', 5 * dpr, canvas.height - 14 * dpr);
-    g.fillText(VMIN + 'dB', canvas.width - 44 * dpr, canvas.height - 14 * dpr);
-    g.fillText(VMAX + 'dB', canvas.width - 44 * dpr, 3 * dpr);
+    g.fillText('1k', 5 * dpr, canvas.height * SP_PIVOT_RATIO - 13 * dpr);
+    g.fillText('20', 5 * dpr, canvas.height - 14 * dpr);
+    g.fillText('0dB', canvas.width - 32 * dpr, 3 * dpr);
+    g.fillText('-80dB', canvas.width - 44 * dpr, canvas.height - 14 * dpr);
     g.strokeStyle = 'rgba(255,255,255,.35)';
-    const y = canvas.height * (ROWS_LIN / ROWS);
+    const y = canvas.height * SP_PIVOT_RATIO;
     g.beginPath(); g.moveTo(0, y); g.lineTo(canvas.width, y); g.stroke();
   }
-  function drawWave(canvas, data, color) {
+  // 波形峰值跨度 + 上下留白 + 标题（整段时长）
+  function drawWave(canvas, wf, wcols, color, title, duration) {
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
     const w = canvas.clientWidth, h = canvas.clientHeight;
     canvas.width = Math.max(1, Math.round(w * dpr));
@@ -322,22 +336,19 @@
     g.fillStyle = '#0d0d0d'; g.fillRect(0, 0, canvas.width, canvas.height);
     g.strokeStyle = '#2a2a2a'; g.beginPath();
     g.moveTo(0, canvas.height / 2); g.lineTo(canvas.width, canvas.height / 2); g.stroke();
-    if (!data) return;
-    const cols = Math.min(canvas.width, 3000), step = data.length / cols;
-    g.strokeStyle = color; g.beginPath();
-    for (let i = 0; i < cols; i++) {
-      const a = Math.floor(i * step), b = Math.max(a + 1, Math.floor((i + 1) * step));
-      let mn = 1e9, mx = -1e9;
-      for (let k = a; k < b; k++) { const v = data[k]; if (v < mn) mn = v; if (v > mx) mx = v; }
-      const x = i / (cols - 1) * canvas.width;
-      const y1 = (1 - Math.max(-1, Math.min(1, mx))) / 2 * canvas.height;
-      const y2 = (1 - Math.max(-1, Math.min(1, mn))) / 2 * canvas.height;
-      g.moveTo(x, y1); g.lineTo(x, y2);
+    if (wf) {
+      const PAD = SP_WAVE_PAD * dpr, inner = Math.max(1, canvas.height - 2 * PAD);
+      g.strokeStyle = color; g.beginPath();
+      for (let i = 0; i < wcols; i++) {
+        const x = i / Math.max(1, wcols - 1) * canvas.width;
+        const a = Math.max(-1, Math.min(1, wf[i * 2])), c = Math.max(-1, Math.min(1, wf[i * 2 + 1]));
+        g.moveTo(x, (1 - c) / 2 * inner + PAD); g.lineTo(x, (1 - a) / 2 * inner + PAD);
+      }
+      g.stroke();
     }
-    g.stroke();
     g.font = (11 * dpr) + 'px sans-serif'; g.textBaseline = 'top';
     g.fillStyle = 'rgba(235,235,235,.85)';
-    g.fillText('+1', 5 * dpr, 3 * dpr); g.fillText('-1', 5 * dpr, canvas.height - 14 * dpr);
+    g.fillText(title + '  ' + fmtTime(0) + ' – ' + fmtTime(duration), 5 * dpr, 3 * dpr);
   }
 
   // ── WAV 导出 (16-bit PCM) ─────────────────────────────
@@ -430,15 +441,22 @@
       setStatus('降噪中…'); setProgress(0);
       await new Promise((r) => setTimeout(r, 0));
       const t0 = performance.now();
-      const { out, dispO, dispD, dispCols } = await denoise(x);
+      const { out } = await denoise(x);
       const dt = ((performance.now() - t0) / 1000).toFixed(1);
       srcBuf = x; denBuf = out;
-      setStatus(`完成 · ${fmtTime(x.length / FS)} · 用时 ${dt}s`);
+      // 展示谱整段另算：原图定参考，降噪后跟随同量程
+      setStatus('画频谱…');
+      await new Promise((r) => setTimeout(r, 0));
+      const vO = spAnalyze(x, FS, null);
+      const vD = spAnalyze(out, FS, vO.ref);
+      const dur = x.length / FS;
+      lastView = { vO, vD, dur };
+      setStatus(`完成 · ${fmtTime(dur)} · 用时 ${dt}s`);
       setProgress(1);
-      drawWave($('#waveOrig'), x, '#e06c75');
-      drawWave($('#waveDen'), out, '#4ec9b0');
-      drawSpec($('#specOrig'), specCanvas(dispO, dispCols));
-      drawSpec($('#specDen'), specCanvas(dispD, dispCols));
+      drawWave($('#waveOrig'), vO.wf, vO.wfCols, '#e06c75', '原图', dur);
+      drawWave($('#waveDen'), vD.wf, vD.wfCols, '#4ec9b0', '降噪后', dur);
+      drawSpec($('#specOrig'), specCanvas(vO.data, vO.cols));
+      drawSpec($('#specDen'), specCanvas(vD.data, vD.cols));
       $('#playOrig').disabled = $('#playDen').disabled = $('#dl').disabled = false;
       updatePlayBtns();
     } catch (e) {
@@ -511,10 +529,6 @@
 
   // ── 事件绑定 ──────────────────────────────────────────
   function init() {
-    const b = b64ToBytes('inferno');
-    cmap = new Uint8Array(256 * 3);
-    cmap.set(b.subarray(0, 256 * 3));
-
     const drop = $('#drop');
     ['dragenter', 'dragover'].forEach((ev) => drop.addEventListener(ev, (e) => {
       e.preventDefault(); drop.classList.add('over');
@@ -539,9 +553,12 @@
     });
     $('#dlOffline').addEventListener('click', exportOffline);
     window.addEventListener('resize', () => {
-      if (srcBuf) {
-        drawWave($('#waveOrig'), srcBuf, '#e06c75');
-        drawWave($('#waveDen'), denBuf, '#4ec9b0');
+      if (lastView) {
+        const { vO, vD, dur } = lastView;
+        drawWave($('#waveOrig'), vO.wf, vO.wfCols, '#e06c75', '原图', dur);
+        drawWave($('#waveDen'), vD.wf, vD.wfCols, '#4ec9b0', '降噪后', dur);
+        drawSpec($('#specOrig'), specCanvas(vO.data, vO.cols));
+        drawSpec($('#specDen'), specCanvas(vD.data, vD.cols));
       }
     });
     setStatus('就绪 · 拖入一个音频文件');

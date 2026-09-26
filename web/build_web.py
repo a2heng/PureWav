@@ -20,7 +20,6 @@
     python web/build_web.py -o /tmp/pw/index.html
 """
 import argparse
-import base64
 import pathlib
 import shutil
 
@@ -33,22 +32,6 @@ ORT_FILES = {
     "glue": "ort-wasm-simd-threaded.mjs",
     "wasm": "ort-wasm-simd-threaded.wasm",
 }
-
-
-def inferno_lut() -> bytes:
-    import numpy as np
-    try:
-        import matplotlib
-        cmap = matplotlib.colormaps["inferno"]
-        rgb = (np.asarray(cmap(np.linspace(0, 1, 256)))[:, :3] * 255).round().astype("uint8")
-    except Exception:
-        # 兜底: inferno 近似控制点线性插值
-        pts = np.array([[0, 0, 4], [40, 11, 84], [101, 21, 110], [159, 42, 99],
-                        [212, 72, 66], [245, 125, 21], [250, 193, 39], [252, 255, 164]], float)
-        x = np.linspace(0, 1, len(pts))
-        xi = np.linspace(0, 1, 256)
-        rgb = np.stack([np.interp(xi, x, pts[:, c]) for c in range(3)], axis=1).round().astype("uint8")
-    return rgb.tobytes()
 
 
 def main():
@@ -76,18 +59,16 @@ def main():
     if "</script" in app_js.lower():
         raise SystemExit("app.js 含 </script>，会截断内联脚本")
     for slot in ("__ORT_JS_URL__", "__GLUE_URL__", "__WASM_URL__",
-                 "__MODEL_URL__", "__INFERNO_B64__", "/*__APP_JS__*/"):
+                 "__MODEL_URL__", "/*__APP_JS__*/"):
         if slot not in tpl:
             raise SystemExit(f"模板缺占位符: {slot}")
-    # 注意：检查只针对模板——app.js 内导出离线版时的自检代码本身就含有
-    # "__ORT_JS_URL__" 字面量，构建产物里有它是正常的。
+    # 注意：检查只针对模板——app.js 内导出逻辑含有同样的字面量，产物里有是正常的。
 
     html = (tpl
             .replace("__ORT_JS_URL__", f"{ort_base}/{ORT_FILES['ort_js']}")
             .replace("__GLUE_URL__", f"{ort_base}/{ORT_FILES['glue']}")
             .replace("__WASM_URL__", f"{ort_base}/{ORT_FILES['wasm']}")
             .replace("__MODEL_URL__", f"assets/{model.name}")
-            .replace("__INFERNO_B64__", base64.b64encode(inferno_lut()).decode("ascii"))
             .replace("/*__APP_JS__*/", app_js))
     out.write_text(html, encoding="utf-8")
     print(f"[build] {out}  ({out.stat().st_size / 1024:.1f} KB)")

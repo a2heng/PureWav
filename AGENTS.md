@@ -38,10 +38,11 @@ Same command without `--noconsole` (keeps console window for debug output).
   `numThreads=1`（无 SharedArrayBuffer 也能跑）
 - 流程：WebAudio 解码 → OfflineAudioContext 重采样 48k 单声道 → JS STFT(960/480/hann) →
   onnxruntime-web 推理 → ISTFT → WAV 导出；Bluestein FFT 处理非 2 的幂的 960 点
-- 单文件拖拽；左侧「原图」右侧「降噪后」各上波形(±1)下频谱(Canvas 2D，无 PIL)
-- 频谱色标以 audioscope (`~/audioscope/src-wasm/wasm_core/spectrogram.zig`) 为标准：
-  power = |X|² / (sum(win)/2)² (满幅单音=0dB)，带内 taper 加权平均功率，
-  db = 10·log10(power)，归一化到 `[VMIN, VMAX] = [-90, -10]`（桌面 spectrum_viz.py 同步此标准）
+- 单文件拖拽；左侧「原图」右侧「降噪后」各上波形（峰值跨度）下频谱（Canvas 2D）
+- 展示谱与 wav_browser 预览同配置：FFT4096 / 50%交叠 / 20Hz起 / 1kHz pivot
+  上下各 256 行（下线性上对数）/ magma 色表 / 相对参考 -80~0dB；
+  整段时长，频率 20Hz–1k–24kHz；原图定参考，降噪后跟随同量程
+  （桌面 spectrum_viz.py 仍是旧 audioscope 标准，两者刻度不同）
 
 ## Key Architecture
 
