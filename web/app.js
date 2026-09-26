@@ -381,12 +381,25 @@
   }
 
   // ── 主流程 ────────────────────────────────────────────
+  async function fetchBytes(url, what) {
+    let r;
+    try {
+      r = await fetch(url);
+    } catch (e) {
+      throw new Error(what + '下载失败（' + (e && e.message || e) +
+        '）。本地双击 file:// 打不开，请用 `python -m http.server` 或部署到 GitHub Pages 后再开');
+    }
+    if (!r.ok) throw new Error(what + '下载失败：HTTP ' + r.status + ' ' + url);
+    return new Uint8Array(await r.arrayBuffer());
+  }
+
   async function loadModel() {
     setStatus('加载模型…');
+    const A = window.PUREWAV_ASSETS || {};
     ort.env.wasm.numThreads = 1;
-    ort.env.wasm.wasmPaths = { mjs: URL.createObjectURL(new Blob([b64ToBytes('glue')], { type: 'text/javascript' })) };
-    ort.env.wasm.wasmBinary = b64ToBytes('wasm');
-    modelBytes = b64ToBytes('model');
+    ort.env.wasm.wasmPaths = { mjs: A.glue };
+    ort.env.wasm.wasmBinary = await fetchBytes(A.wasm, '运行时');
+    modelBytes = await fetchBytes(A.model, '模型');
     session = await ort.InferenceSession.create(modelBytes, { executionProviders: ['wasm'] });
     setStatus('模型就绪');
   }

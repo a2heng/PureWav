@@ -22,17 +22,20 @@ Output: `dist/PureWav.exe` (PyAV ships its own PyInstaller hooks, no `--add-bina
 **Package (debug, no --noconsole):**
 Same command without `--noconsole` (keeps console window for debug output).
 
-## Web 版 (纯前端 / 全离线 / 单文件)
+## Web 版 (瘦页面 + 共享重资源，可部署到 GitHub Pages)
 
 - 目录 `web/`：`template.html` + `app.js` + `build_web.py`
-- 构建：`python web/build_web.py` → `web/PureWavWeb.html`（~21MB，gitignore）
-  把 onnxruntime-web (UMD JS + glue .mjs + 14MB wasm)、ONNX 模型、inferno 色表全部 base64 内嵌，
-  产物完全离线、双击即用（file:// 可用，无需服务器）
-- 运行时：`ort.env.wasm.wasmPaths={mjs: blob}` + `ort.env.wasm.wasmBinary=<bytes>`（不 fetch），
+- 构建：`python web/build_web.py` → `web/dist/index.html`（~27KB）+ `web/dist/assets/*.onnx`
+  （产物目录 gitignore，手动传到 `a2heng.github.io` 仓库的 `purewav/` 下，不走工作流）。
+  页面本体只含应用代码；重资源按 URL 加载：ONNX Runtime Web 三件套（UMD JS +
+  glue + wasm，锁 1.29.0）默认指向已部署的 PureVox 页面共用地址
+  `https://a2heng.github.io/purevox/assets/ort`（glue/wasm 与 PureVox 页字节一致，
+  浏览器缓存命中，不重复下载；可用 `--ort-base` 换 CDN），模型随页面部署。
+- 瘦页面不能再双击 file:// 打开，本地预览：`python -m http.server --directory web/dist`
+- 运行时：`ort.env.wasm.wasmPaths={mjs: url}` + fetch 来的 `wasmBinary`，
   `numThreads=1`（无 SharedArrayBuffer 也能跑）
 - 流程：WebAudio 解码 → OfflineAudioContext 重采样 48k 单声道 → JS STFT(960/480/hann) →
   onnxruntime-web 推理 → ISTFT → WAV 导出；Bluestein FFT 处理非 2 的幂的 960 点
-- 依赖 onnxruntime-web 的 dist（`web/.ort/` 或 `--ort` 指定）；与 Python 输出数值一致（corr≈1.0）
 - 单文件拖拽；左侧「原图」右侧「降噪后」各上波形(±1)下频谱(Canvas 2D，无 PIL)
 - 频谱色标以 audioscope (`~/audioscope/src-wasm/wasm_core/spectrogram.zig`) 为标准：
   power = |X|² / (sum(win)/2)² (满幅单音=0dB)，带内 taper 加权平均功率，

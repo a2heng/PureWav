@@ -13,7 +13,8 @@ py38/
 /audio_denoise_config.json
 test.wav
 
-# web 版构建产物 (由 web/build_web.py 生成, ~21MB 不入库)
+# web 版构建产物 (由 web/build_web.py 生成，不入库，手动传 io)
+web/dist/
 web/PureWavWeb.html
 web/.ort/
 web/node_modules/
