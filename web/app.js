@@ -483,13 +483,19 @@
         '<script id="glue" type="text/plain">' + bytesToB64(glue) + '</scr' + 'ipt>\n' +
         '<script id="wasm" type="text/plain">' + bytesToB64(wasm) + '</scr' + 'ipt>\n' +
         '<script id="model" type="text/plain">' + bytesToB64(model) + '</scr' + 'ipt>\n';
-      src = src.replace(/<script>window\.PUREWAV_ASSETS=\{[^}]*\};<\/script>/,
+      // 用替换前后是否变化判定是否咬住目标（子串包含检查不可靠：
+      // app.js 自身就含有同样的字面量，会永远命中误报）。
+      const next1 = src.replace(/<script>window\.PUREWAV_ASSETS=\{[^}]*\};<\/script>/,
         '<script>window.PUREWAV_ASSETS={glue:"#glue",wasm:"#wasm",model:"#model"};</scr' + 'ipt>\n' + blobs);
-      src = src.replace(/<script src="[^"]*ort\.wasm\.min\.js"><\/script>/,
-        '<script>\n' + ortJs + '\n</scr' + 'ipt>');
-      if (src.indexOf('__ORT_JS_URL__') >= 0 || src.indexOf('"#glue"') < 0) {
+      if (next1 === src) {
         throw new Error('页面结构对不上，导出中止（页面不是新版在线版？）');
       }
+      const next2 = next1.replace(/<script src="[^"]*ort\.wasm\.min\.js"><\/script>/,
+        '<script>\n' + ortJs + '\n</scr' + 'ipt>');
+      if (next2 === next1) {
+        throw new Error('页面结构对不上，导出中止（找不到运行时脚本位）');
+      }
+      src = next2;
       const url = URL.createObjectURL(new Blob([src], { type: 'text/html' }));
       const a = document.createElement('a');
       a.href = url; a.download = 'PureWavWeb.html'; a.click();
