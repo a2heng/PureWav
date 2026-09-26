@@ -381,6 +381,12 @@
   }
 
   // ── 主流程 ────────────────────────────────────────────
+  // 资源两种形态：在线版是 URL（fetch），离线单文件版是 "#id"
+  //（读同文档内 base64 脚本块，file:// 也能用）。
+  async function assetBytes(v, what) {
+    if (typeof v === 'string' && v.charAt(0) === '#') return b64ToBytes(v.slice(1));
+    return fetchBytes(v, what);
+  }
   async function fetchBytes(url, what) {
     let r;
     try {
@@ -397,9 +403,14 @@
     setStatus('加载模型…');
     const A = window.PUREWAV_ASSETS || {};
     ort.env.wasm.numThreads = 1;
-    ort.env.wasm.wasmPaths = { mjs: A.glue };
-    ort.env.wasm.wasmBinary = await fetchBytes(A.wasm, '运行时');
-    modelBytes = await fetchBytes(A.model, '模型');
+    let glue = A.glue;
+    if (typeof glue === 'string' && glue.charAt(0) === '#') {
+      glue = URL.createObjectURL(new Blob([b64ToBytes(glue.slice(1))],
+        { type: 'text/javascript' }));
+    }
+    ort.env.wasm.wasmPaths = { mjs: glue };
+    ort.env.wasm.wasmBinary = await assetBytes(A.wasm, '运行时');
+    modelBytes = await assetBytes(A.model, '模型');
     session = await ort.InferenceSession.create(modelBytes, { executionProviders: ['wasm'] });
     setStatus('模型就绪');
   }
@@ -436,6 +447,62 @@
     }
   }
 
+  // ── 导出离线版：把当前页 + 全部重资源打包成单文件 HTML ──
+  // 在线版保持苗条；离线包按需在浏览器里现拼（fetch → base64 内嵌），
+  // 存下来以后双击 file:// 即用。构建侧不再产第二个文件。
+  function bytesToB64(u8) {
+    let s = '';
+    for (let i = 0; i < u8.length; i += 0x8000) {
+      s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000));
+    }
+    return btoa(s);
+  }
+  async function exportOffline() {
+    const btn = $('#dlOffline');
+    try {
+      btn.disabled = true;
+      const A = window.PUREWAV_ASSETS || {};
+      setStatus('打包离线版：下载运行时…');
+      const ortJs = await (await fetch(A.ortJs)).text();
+      if (ortJs.toLowerCase().indexOf('</scr' + 'ipt') >= 0) {
+        throw new Error('运行时内嵌会截断页面，导出中止');
+      }
+      await new Promise((r) => setTimeout(r, 0));
+      setStatus('打包离线版：下载模型(约 2MB)…');
+      const wasm = new Uint8Array(await (await fetch(A.wasm)).arrayBuffer());
+      await new Promise((r) => setTimeout(r, 0));
+      setStatus('打包离线版：转码中…');
+      const glue = new Uint8Array(await (await fetch(A.glue)).arrayBuffer());
+      const model = new Uint8Array(await (await fetch(A.model)).arrayBuffer());
+      setStatus('打包离线版：组装中…');
+      await new Promise((r) => setTimeout(r, 0));
+      let src = await (await fetch(location.href.split(/[?#]/)[0])).text();
+      // 注意：'</scr'+'ipt>' 写法是故意的——字面闭合标签会提前终结
+      // 当前页面内联的 script 块（HTML 解析器不认 JS 字符串）。
+      const blobs =
+        '<script id="glue" type="text/plain">' + bytesToB64(glue) + '</scr' + 'ipt>\n' +
+        '<script id="wasm" type="text/plain">' + bytesToB64(wasm) + '</scr' + 'ipt>\n' +
+        '<script id="model" type="text/plain">' + bytesToB64(model) + '</scr' + 'ipt>\n';
+      src = src.replace(/<script>window\.PUREWAV_ASSETS=\{[^}]*\};<\/script>/,
+        '<script>window.PUREWAV_ASSETS={glue:"#glue",wasm:"#wasm",model:"#model"};</scr' + 'ipt>\n' + blobs);
+      src = src.replace(/<script src="[^"]*ort\.wasm\.min\.js"><\/script>/,
+        '<script>\n' + ortJs + '\n</scr' + 'ipt>');
+      if (src.indexOf('__ORT_JS_URL__') >= 0 || src.indexOf('"#glue"') < 0) {
+        throw new Error('页面结构对不上，导出中止（页面不是新版在线版？）');
+      }
+      const url = URL.createObjectURL(new Blob([src], { type: 'text/html' }));
+      const a = document.createElement('a');
+      a.href = url; a.download = 'PureWavWeb.html'; a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
+      setStatus('离线版已开始下载（PureWavWeb.html，双击即用）');
+    } catch (e) {
+      console.error(e);
+      setStatus('导出失败: ' + (e && e.message || e));
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
   // ── 事件绑定 ──────────────────────────────────────────
   function init() {
     const b = b64ToBytes('inferno');
@@ -464,6 +531,7 @@
       a.href = url; a.download = srcName + '_降噪.wav'; a.click();
       setTimeout(() => URL.revokeObjectURL(url), 4000);
     });
+    $('#dlOffline').addEventListener('click', exportOffline);
     window.addEventListener('resize', () => {
       if (srcBuf) {
         drawWave($('#waveOrig'), srcBuf, '#e06c75');

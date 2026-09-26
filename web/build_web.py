@@ -1,27 +1,28 @@
 #!/usr/bin/env python3
-"""构建 PureWav Web（瘦页面 + 共享重资源，可直接部署到 GitHub Pages）。
+"""构建 PureWav Web 在线版：瘦页面 + 共享重资源，可直接部署到 GitHub Pages。
 
 页面本体只含应用代码（CSS/JS 内联，约几十 KB）；重资源按 URL 加载：
-  - ONNX Runtime Web（UMD JS + glue + wasm，1.29.0）默认指向已部署的
+  - ONNX Runtime Web 三件套（UMD JS + glue + wasm，锁 1.29.0）默认指向已部署的
     PureVox 页面共用地址（同一份文件，浏览器缓存命中，不重复下载）；
     可用 --ort-base 换成 jsDelivr 等 CDN。
   - ONNX 模型随页面部署（复制到产物 assets/ 下）。
 
-注意：瘦页面不能再双击 file:// 打开（fetch 会被拦），本地预览用：
+离线单文件版不在构建侧产出：在线页自带「下载离线版」按钮，在浏览器里把
+运行时 + 模型打包成一个 HTML 存下来（双击 file:// 即用）。
+
+注意：瘦页面不能再双击 file:// 打开，本地预览用：
     python -m http.server --directory web/dist
 
 用法:
-    python web/build_web.py                          # 默认 1.29.0 + 仓库模型
+    python web/build_web.py
     python web/build_web.py --model xxx.onnx
     python web/build_web.py --ort-base https://cdn.jsdelivr.net/npm/onnxruntime-web@1.29.0/dist
     python web/build_web.py -o /tmp/pw/index.html
 """
 import argparse
 import base64
-import os
 import pathlib
 import shutil
-import sys
 
 HERE = pathlib.Path(__file__).resolve().parent
 ROOT = HERE.parent
@@ -55,7 +56,7 @@ def main():
     ap.add_argument("-o", "--out", default=str(DEFAULT_OUT), help="输出 HTML 路径")
     ap.add_argument("--model", default=str(ROOT / "v6_erb_skip_proj_batch.onnx"))
     ap.add_argument("--ort-base", default=DEFAULT_ORT_BASE,
-                    help="ORT 运行时 URL 前缀（1.29.0 三件套）")
+                    help="ORT 运行时 URL 前缀（三件套 1.29.0）")
     args = ap.parse_args()
 
     model = pathlib.Path(args.model)
@@ -74,6 +75,12 @@ def main():
     app_js = (HERE / "app.js").read_text(encoding="utf-8")
     if "</script" in app_js.lower():
         raise SystemExit("app.js 含 </script>，会截断内联脚本")
+    for slot in ("__ORT_JS_URL__", "__GLUE_URL__", "__WASM_URL__",
+                 "__MODEL_URL__", "__INFERNO_B64__", "/*__APP_JS__*/"):
+        if slot not in tpl:
+            raise SystemExit(f"模板缺占位符: {slot}")
+    # 注意：检查只针对模板——app.js 内导出离线版时的自检代码本身就含有
+    # "__ORT_JS_URL__" 字面量，构建产物里有它是正常的。
 
     html = (tpl
             .replace("__ORT_JS_URL__", f"{ort_base}/{ORT_FILES['ort_js']}")
@@ -82,14 +89,10 @@ def main():
             .replace("__MODEL_URL__", f"assets/{model.name}")
             .replace("__INFERNO_B64__", base64.b64encode(inferno_lut()).decode("ascii"))
             .replace("/*__APP_JS__*/", app_js))
-    if "__" in html and ("__ORT_" in html or "__GLUE_" in html or "__WASM_" in html
-                         or "__MODEL_" in html or "__INFERNO_" in html or "__APP_JS__" in html):
-        raise SystemExit("模板占位符未替换完")
-
     out.write_text(html, encoding="utf-8")
     print(f"[build] {out}  ({out.stat().st_size / 1024:.1f} KB)")
-    print(f"[build] 模型: assets/{model.name}  ({dst_model.stat().st_size / 1024 / 1024:.2f} MB)")
-    print(f"[build] ORT:  {ort_base}/ （三件套 1.29.0，与 PureVox 页共用同一份）")
+    print(f"[build]   模型 assets/{model.name}  ({dst_model.stat().st_size / 1024 / 1024:.2f} MB)")
+    print("[build]   ORT %s/ （三件套 1.29.0，与 PureVox 页共用同一份）" % ort_base)
     print("[build] 本地预览: python -m http.server --directory " + str(out.parent))
     print("[build] 上 io: 手动把产物目录传到 a2heng.github.io 仓库的 purewav/ 下")
 

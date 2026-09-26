@@ -31,7 +31,9 @@ Same command without `--noconsole` (keeps console window for debug output).
   glue + wasm，锁 1.29.0）默认指向已部署的 PureVox 页面共用地址
   `https://a2heng.github.io/purevox/assets/ort`（glue/wasm 与 PureVox 页字节一致，
   浏览器缓存命中，不重复下载；可用 `--ort-base` 换 CDN），模型随页面部署。
-- 瘦页面不能再双击 file:// 打开，本地预览：`python -m http.server --directory web/dist`
+- 离线版不在构建侧产出：在线页自带「下载离线版」按钮，在浏览器里把运行时 +
+  模型打包成单个 HTML 存下来（`PureWavWeb.html`，双击 file:// 即用）。
+  瘦页面本身不支持 file:// 双击，本地预览：`python -m http.server --directory web/dist`
 - 运行时：`ort.env.wasm.wasmPaths={mjs: url}` + fetch 来的 `wasmBinary`，
   `numThreads=1`（无 SharedArrayBuffer 也能跑）
 - 流程：WebAudio 解码 → OfflineAudioContext 重采样 48k 单声道 → JS STFT(960/480/hann) →

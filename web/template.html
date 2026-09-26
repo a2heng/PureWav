@@ -53,6 +53,7 @@
   <button id="playOrig" disabled>▶ 原图</button>
   <button id="playDen" disabled>▶ 降噪后</button>
   <button id="dl" disabled>下载 WAV</button>
+  <button id="dlOffline" title="把运行时+模型打包进单个 HTML，存下来以后可离线双击用">下载离线版</button>
 </div>
 <div id="barwrap"><div id="bar"></div></div>
 <div id="panels">
@@ -71,7 +72,7 @@
 <div id="links">开源代码：<a href="https://github.com/a2heng/PureWav" target="_blank" rel="noopener">github.com/a2heng/PureWav</a>
 　网盘下载：<a href="https://pan.quark.cn/s/3ef63fbb29a1?pwd=vaY8" target="_blank" rel="noopener">夸克网盘</a>（提取码：vaY8）</div>
 
-<script>window.PUREWAV_ASSETS={glue:"__GLUE_URL__",wasm:"__WASM_URL__",model:"__MODEL_URL__"};</script>
+<script>window.PUREWAV_ASSETS={ortJs:"__ORT_JS_URL__",glue:"__GLUE_URL__",wasm:"__WASM_URL__",model:"__MODEL_URL__"};</script>
 <script id="inferno" type="text/plain">__INFERNO_B64__</script>
 <script src="__ORT_JS_URL__"></script>
 <script>/*__APP_JS__*/</script>

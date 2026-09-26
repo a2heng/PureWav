@@ -30,7 +30,8 @@ python web/build_web.py     # -> web/dist/index.html + web/dist/assets/*.onnx
 页面本体只有约 27KB；ONNX Runtime 与 PureVox 网页共用同一份（浏览器缓存命中，
 不重复下载），模型随页面部署。在线地址：https://a2heng.github.io/purewav/ 。
 拖入单个音频文件，浏览器端完成解码 → STFT → ONNX 推理 → ISTFT，可播放/对比并下载降噪后的 WAV。
-本地预览：`python -m http.server --directory web/dist`（瘦页面不支持 file:// 双击打开）。
+页内「下载离线版」按钮可导出单文件离线版（双击即用）；在线版本地预览：
+`python -m http.server --directory web/dist`（瘦页面不支持 file:// 双击打开）。
 
 ## 打包
 
